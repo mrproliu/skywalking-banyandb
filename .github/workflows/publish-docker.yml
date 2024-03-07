@@ -28,7 +28,6 @@ env:
 
 jobs:
   push-banyandb-image:
-    if: github.repository == 'apache/skywalking-banyandb'
     runs-on: ${{ matrix.target }}-latest
     permissions:
       contents: read
