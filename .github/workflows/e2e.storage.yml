@@ -31,7 +31,6 @@ concurrency:
 
 jobs:
   StoragePlugins:
-    if: (github.event_name == 'schedule' && github.repository == 'apache/skywalking-banyandb') || (github.event_name != 'schedule')
     name: Storage E2E
     runs-on: ubuntu-latest
     timeout-minutes: 90
