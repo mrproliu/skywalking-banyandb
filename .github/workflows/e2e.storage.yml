@@ -88,6 +88,8 @@ jobs:
         run: make generate
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v1
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
       - name: Build docker image
         run: |
           make docker.build || make docker.build
