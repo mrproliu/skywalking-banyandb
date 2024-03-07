@@ -24,6 +24,10 @@ ifndef IMG_NAME
 $(error The IMG_NAME variable should be set)
 endif
 
+ifndef PLATFORM
+$(error The PLATFORM variable should be set)
+endif
+
 # The tag of the docker image. The default value if latest.
 TAG ?= latest
 
@@ -53,7 +57,7 @@ endif
 .PHONY: docker
 docker:
 	@echo "Build $(IMG)"
-	$(TIME) $(DOCKER_BUILD) $(DOCKER_BUILD_ARGS) -t $(IMG) -f $(DOCKER_FILE) ..
+	$(TIME) $(DOCKER_BUILD) $(DOCKER_BUILD_ARGS) --platform $(PLATFORM) -t $(IMG) -f $(DOCKER_FILE) ..
 
 .PHONY: docker.push
 docker.push:
