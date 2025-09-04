@@ -78,6 +78,7 @@ var _ = g.BeforeSuite(func() {
 	if kubeInCluster {
 		config, err = rest.InClusterConfig()
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		k8sRestConfig = config
 	} else {
 		if deployKindCluster {
 			fmt.Println("Creating kind cluster, config:", kubeConfigPath)
@@ -96,14 +97,15 @@ var _ = g.BeforeSuite(func() {
 
 		config, err = clientcmd.BuildConfigFromFlags("", kubeConfigPath)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		kubeConfigYaml, err := os.ReadFile(kubeConfigPath)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		k8sRestConfig, err = clientcmd.RESTConfigFromKubeConfig(kubeConfigYaml)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 
 	k8sClient, err = kubernetes.NewForConfig(config)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	kubeConfigYaml, err := os.ReadFile(kubeConfigPath)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	k8sRestConfig, err = clientcmd.RESTConfigFromKubeConfig(kubeConfigYaml)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
 })
 
 var _ = g.AfterSuite(func() {
