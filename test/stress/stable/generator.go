@@ -37,10 +37,10 @@ type baseGenerator[Request proto.Message] struct {
 	requestGenerator    func() Request
 	getSchema           func(Request) schema[Request]
 	getDataFromChannels func(dataChannel chan requestWrapper[Request]) (*requestWrapper[Request], bool)
-	postGenerate        func(scaler *dataScaler[Request], serviceNames []string, request Request, downstream *downstreamTimeInfo) bool
+	postGenerate        func(scaler *dataScaler[Request], serviceNames []string, subEntityName string, request Request, downstream *downstreamTimeInfo) bool
 	currentFile         *os.File
 	cancel              context.CancelFunc
-	scaleServiceCount   int
+	scales              *scalerCounts
 	downstreamLock      sync.RWMutex
 }
 
@@ -50,19 +50,19 @@ type generatorCallback interface {
 
 func newBaseGenerator[Request proto.Message](
 	path string,
-	scaleServiceCount int,
+	scales *scalerCounts,
 	requestChannelLen int,
 	generate func() Request,
 	getSchema func(Request) schema[Request],
 	getDataFromChannels func(dataChannel chan requestWrapper[Request]) (*requestWrapper[Request], bool),
-	postGenerate func(scaler *dataScaler[Request], serviceNames []string, request Request, downstream *downstreamTimeInfo) bool,
+	postGenerate func(scaler *dataScaler[Request], serviceNames []string, subEntityName string, request Request, downstream *downstreamTimeInfo) bool,
 ) (*baseGenerator[Request], error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	return &baseGenerator[Request]{
-		scaleServiceCount:   scaleServiceCount,
+		scales:              scales,
 		currentFile:         file,
 		currentReader:       bufio.NewReader(file),
 		requestChannel:      make(chan requestWrapper[Request], requestChannelLen),
@@ -104,7 +104,8 @@ func (b *baseGenerator[Request]) generateData(owner generatorCallback) {
 	start := time.Now()
 
 	//fast write next 1h data
-	for i := range 60 * 24 * 3 {
+	//for i := range 60 * 24 * 3 {
+	for i := range 1 {
 		fmt.Println("starting fast write next 1 minute data, index: ", i)
 		b.generateDataFromFileStart(downstream)
 		downstream.increaseOneMinute()
@@ -243,11 +244,10 @@ func (b *baseGenerator[Request]) generate(appoint *downstreamTimeInfo) {
 		errUnmarshal := protojson.Unmarshal([]byte(line), req)
 		gomega.Expect(errUnmarshal).NotTo(gomega.HaveOccurred())
 
-		b.scaler = newDataScaler[Request](b.getSchema(req), req, b.scaleServiceCount)
-		data := b.scaler.generate(b.scaleServiceCount, downstream, b)
-		for _, d := range data {
+		b.scaler = newDataScaler[Request](b.getSchema(req), req, b.scales)
+		b.scaler.generate(downstream, b, func(d Request) {
 			b.requestChannel <- requestWrapper[Request]{request: d, minute: downstream.minute}
-		}
+		})
 	}
 }
 
@@ -277,26 +277,40 @@ func (d *downstreamTimeInfo) increaseOneMinute() {
 	d.day = d.now.Truncate(24 * time.Hour)
 }
 
+type scalerCounts struct {
+	service  int
+	instance int
+	endpoint int
+}
+
 type dataScaler[T proto.Message] struct {
 	schema             schema[T]
 	measureReq         T
 	subEntityName      string
-	baseServiceNames   []string
 	relatedFieldValues []*EntityIDFieldValue
-	curScaleCount      int
-	maxScaleCount      int
+	subEntity          *EntityIDFieldValue
+	scales             *scalerCounts
+	baseServiceNames   []string
 }
 
-func newDataScaler[T proto.Message](schema schema[T], request T, maxScaleCount int) *dataScaler[T] {
+func newDataScaler[T proto.Message](schema schema[T], request T, scales *scalerCounts) *dataScaler[T] {
 	baseServiceNames, err := schema.GetServiceName(request)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("failed to get service names from measure: %s", schema.GetName()))
-	relatedFieldValues := schema.GetRelatedFieldValues(request)
+	if err != nil {
+		panic(err)
+	}
+	subEntity, all := schema.GetRelatedFieldValues(request)
+	var subEntityName string
+	if subEntity != nil {
+		subEntityName = subEntity.Value
+	}
 	return &dataScaler[T]{
 		schema:             schema,
 		measureReq:         request,
-		maxScaleCount:      maxScaleCount,
+		scales:             scales,
+		subEntity:          subEntity,
 		baseServiceNames:   baseServiceNames,
-		relatedFieldValues: relatedFieldValues,
+		relatedFieldValues: all,
+		subEntityName:      subEntityName,
 	}
 }
 
@@ -307,17 +321,17 @@ func (d *dataScaler[T]) getSubEntityName() string {
 
 	schemaName := d.schema.GetName()
 	var subEntityName string
-	if d.schema.getScope() == entityScopeTypeServiceInstance {
+	if d.schema.getScope() == EntityScopeTypeServiceInstance {
 		for _, v := range d.relatedFieldValues {
-			if v.field.scope == entityScopeTypeServiceInstance {
+			if v.field.scope == EntityScopeTypeServiceInstance {
 				name, err := base64.StdEncoding.DecodeString(v.Value)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("failed to decode service instance name: %s, mesure name: %s", v.Value, schemaName))
 				subEntityName = string(name)
 			}
 		}
-	} else if d.schema.getScope() == entityScopeTypeEndpoint {
+	} else if d.schema.getScope() == EntityScopeTypeEndpoint {
 		for _, v := range d.relatedFieldValues {
-			if v.field.scope == entityScopeTypeEndpoint {
+			if v.field.scope == EntityScopeTypeEndpoint {
 				name, err := base64.StdEncoding.DecodeString(v.Value)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("failed to decode service endpoint name: %s, mesure name: %s", v.Value, schemaName))
 				subEntityName = string(name)
@@ -328,44 +342,68 @@ func (d *dataScaler[T]) getSubEntityName() string {
 	return subEntityName
 }
 
-func (d *dataScaler[T]) generate(count int, downstream *downstreamTimeInfo, generator *baseGenerator[T]) []T {
-	if d.curScaleCount >= d.maxScaleCount {
-		return nil
+func (d *dataScaler[T]) generate(downstream *downstreamTimeInfo, generator *baseGenerator[T], add func(T)) {
+	var totalCount = d.scales.service
+	if d.schema.getScope() == EntityScopeTypeServiceInstance {
+		totalCount *= d.scales.instance
+	} else if d.schema.getScope() == EntityScopeTypeEndpoint {
+		totalCount *= d.scales.endpoint
 	}
-
-	result := make([]T, 0, count)
-	for ; d.curScaleCount < d.maxScaleCount; d.curScaleCount++ {
-		newReq := proto.Clone(d.measureReq).(T)
-		serviceNames := d.applySequenceToData(newReq, d.curScaleCount)
-		if ignore := generator.postGenerate(d, serviceNames, newReq, downstream); ignore {
-			continue
+	addOrIgnore := func(data T, serviceNames []string, subEntity string) {
+		if ignore := generator.postGenerate(d, serviceNames, subEntity, data, downstream); ignore {
+			return
 		}
-		result = append(result, newReq)
+		add(data)
 	}
-	return result
-}
+	for serviceSeq := 0; serviceSeq < d.scales.service; serviceSeq++ {
+		if d.schema.GetType() == schemaTypeMeasure && len(d.baseServiceNames) == 0 {
+			panic(fmt.Sprintf("schema cannot found any service entity: %s", d.schema.GetName()))
+		}
 
-func (d *dataScaler[T]) applySequenceToData(req T, sequence int) []string {
-	if d.schema.GetType() == schemaTypeMeasure && len(d.baseServiceNames) == 0 {
-		panic(fmt.Sprintf("schema cannot found any service entity: %s", d.schema.GetName()))
-	}
+		serviceNames := d.schema.getBaseSchema().generateServiceName(d.baseServiceNames, serviceSeq)
 
-	serviceNames := make([]string, 0, len(d.baseServiceNames))
-	for _, base := range d.baseServiceNames {
-		serviceName := fmt.Sprintf("%s-%d", base, sequence)
-		serviceNames = append(serviceNames, serviceName)
+		switch d.schema.getScope() {
+		case EntityScopeTypeServiceInstance:
+			for instanceSeq := 0; instanceSeq < d.scales.instance; instanceSeq++ {
+				newReq := proto.Clone(d.measureReq).(T)
+				instanceName := d.schema.getBaseSchema().generateInstanceName(serviceNames[0], d.subEntityName, instanceSeq)
+				for _, fv := range d.relatedFieldValues {
+					d.schema.ApplyFieldChange(newReq, serviceNames, instanceName, fv)
+				}
+				addOrIgnore(newReq, serviceNames, instanceName)
+			}
+		case EntityScopeTypeEndpoint:
+			for endpointSeq := 0; endpointSeq < d.scales.endpoint; endpointSeq++ {
+				newReq := proto.Clone(d.measureReq).(T)
+				endpointName := d.schema.getBaseSchema().generateEndpointName(serviceNames[0], d.subEntityName, endpointSeq)
+				for _, fv := range d.relatedFieldValues {
+					d.schema.ApplyFieldChange(newReq, serviceNames, endpointName, fv)
+				}
+				addOrIgnore(newReq, serviceNames, endpointName)
+			}
+		case EntityScopeTypeService:
+			newReq := proto.Clone(d.measureReq).(T)
+			for _, fv := range d.relatedFieldValues {
+				d.schema.ApplyFieldChange(newReq, serviceNames, "", fv)
+			}
+			addOrIgnore(newReq, serviceNames, "")
+		case entityScopeTypeServiceRelation:
+			newReq := proto.Clone(d.measureReq).(T)
+			for _, fv := range d.relatedFieldValues {
+				d.schema.ApplyFieldChange(newReq, serviceNames, "", fv)
+			}
+			addOrIgnore(newReq, serviceNames, "")
+		default:
+			panic(fmt.Errorf("unsupported entity scope: %d", d.schema.getScope()))
+		}
 	}
-	for _, fv := range d.relatedFieldValues {
-		d.schema.ApplyFieldChange(req, serviceNames, fv)
-	}
-	return serviceNames
 }
 
 type measureDataGenerator struct {
 	*baseGenerator[*measurev1.WriteRequest]
 	trafficChannel         chan *measurev1.WriteRequest
 	trafficRegister        map[string]bool
-	trafficRequests        map[entityScopeType][]*measurev1.WriteRequest
+	trafficRequests        map[EntityScopeType][]*measurev1.WriteRequest
 	schemas                map[string]*MeasureSchema
 	trafficCounterService  int64
 	trafficCounterInstance int64
@@ -376,13 +414,13 @@ type measureDataGenerator struct {
 	dayGenerator  *baseGenerator[*measurev1.WriteRequest]
 }
 
-func newMeasureDataGenerator(dir string, scaleServiceCount, requestChannelSize int, schemas map[string]*MeasureSchema) (*measureDataGenerator, error) {
+func newMeasureDataGenerator(dir string, scales *scalerCounts, requestChannelSize int, schemas map[string]*MeasureSchema) (*measureDataGenerator, error) {
 	var err error
 	measureGenerator := &measureDataGenerator{
 		trafficChannel:  make(chan *measurev1.WriteRequest, requestChannelSize),
 		schemas:         schemas,
 		trafficRegister: make(map[string]bool),
-		trafficRequests: make(map[entityScopeType][]*measurev1.WriteRequest),
+		trafficRequests: make(map[EntityScopeType][]*measurev1.WriteRequest),
 	}
 	go func() {
 		for {
@@ -393,13 +431,13 @@ func newMeasureDataGenerator(dir string, scaleServiceCount, requestChannelSize i
 				measureGenerator.trafficCounterEndpoint)
 		}
 	}()
-	measureGenerator.hourGenerator, err = newBaseGenerator[*measurev1.WriteRequest](filepath.Join(dir, "hour"), scaleServiceCount, requestChannelSize, func() *measurev1.WriteRequest {
+	measureGenerator.hourGenerator, err = newBaseGenerator[*measurev1.WriteRequest](filepath.Join(dir, "hour"), scales, requestChannelSize, func() *measurev1.WriteRequest {
 		return &measurev1.WriteRequest{}
 	}, func(request *measurev1.WriteRequest) schema[*measurev1.WriteRequest] {
 		return schemas[request.Metadata.Name]
 	}, func(dataChannel chan requestWrapper[*measurev1.WriteRequest]) (*requestWrapper[*measurev1.WriteRequest], bool) {
 		return nil, false
-	}, func(scaler *dataScaler[*measurev1.WriteRequest], serviceNames []string, request *measurev1.WriteRequest, downstream *downstreamTimeInfo) bool {
+	}, func(scaler *dataScaler[*measurev1.WriteRequest], serviceNames []string, _ string, request *measurev1.WriteRequest, downstream *downstreamTimeInfo) bool {
 		request.DataPoint.Timestamp = timestamppb.New(measureGenerator.adjustTimeFromTime(request.DataPoint.Timestamp.AsTime(), downstream))
 		request.Metadata.ModRevision = 0
 		return false
@@ -407,13 +445,13 @@ func newMeasureDataGenerator(dir string, scaleServiceCount, requestChannelSize i
 	if err != nil {
 		return nil, err
 	}
-	measureGenerator.dayGenerator, err = newBaseGenerator[*measurev1.WriteRequest](filepath.Join(dir, "day"), scaleServiceCount, requestChannelSize, func() *measurev1.WriteRequest {
+	measureGenerator.dayGenerator, err = newBaseGenerator[*measurev1.WriteRequest](filepath.Join(dir, "day"), scales, requestChannelSize, func() *measurev1.WriteRequest {
 		return &measurev1.WriteRequest{}
 	}, func(request *measurev1.WriteRequest) schema[*measurev1.WriteRequest] {
 		return schemas[request.Metadata.Name]
 	}, func(dataChannel chan requestWrapper[*measurev1.WriteRequest]) (*requestWrapper[*measurev1.WriteRequest], bool) {
 		return nil, false
-	}, func(scaler *dataScaler[*measurev1.WriteRequest], serviceNames []string, request *measurev1.WriteRequest, downstream *downstreamTimeInfo) bool {
+	}, func(scaler *dataScaler[*measurev1.WriteRequest], serviceNames []string, _ string, request *measurev1.WriteRequest, downstream *downstreamTimeInfo) bool {
 		request.DataPoint.Timestamp = timestamppb.New(measureGenerator.adjustTimeFromTime(request.DataPoint.Timestamp.AsTime(), downstream))
 		request.Metadata.ModRevision = 0
 		return false
@@ -422,7 +460,7 @@ func newMeasureDataGenerator(dir string, scaleServiceCount, requestChannelSize i
 		return nil, err
 	}
 
-	measureGenerator.baseGenerator, err = newBaseGenerator[*measurev1.WriteRequest](filepath.Join(dir, "minute"), scaleServiceCount, requestChannelSize, func() *measurev1.WriteRequest {
+	measureGenerator.baseGenerator, err = newBaseGenerator[*measurev1.WriteRequest](filepath.Join(dir, "minute"), scales, requestChannelSize, func() *measurev1.WriteRequest {
 		return &measurev1.WriteRequest{}
 	}, func(request *measurev1.WriteRequest) schema[*measurev1.WriteRequest] {
 		return schemas[request.Metadata.Name]
@@ -439,14 +477,14 @@ func newMeasureDataGenerator(dir string, scaleServiceCount, requestChannelSize i
 		default:
 		}
 		return nil, false
-	}, func(scaler *dataScaler[*measurev1.WriteRequest], serviceNames []string, request *measurev1.WriteRequest, downstream *downstreamTimeInfo) bool {
+	}, func(scaler *dataScaler[*measurev1.WriteRequest], serviceNames []string, subEntityName string, request *measurev1.WriteRequest, downstream *downstreamTimeInfo) bool {
 		for _, serviceName := range serviceNames {
 			measureGenerator.registerServiceTraffic(serviceName)
 		}
-		if scaler.schema.getScope() == entityScopeTypeServiceInstance {
-			measureGenerator.registerServiceInstanceTraffic(serviceNames[0], scaler.getSubEntityName())
-		} else if scaler.schema.getScope() == entityScopeTypeEndpoint {
-			measureGenerator.registerServiceEndpointTraffic(serviceNames[0], scaler.getSubEntityName())
+		if scaler.schema.getScope() == EntityScopeTypeServiceInstance {
+			measureGenerator.registerServiceInstanceTraffic(serviceNames[0], subEntityName)
+		} else if scaler.schema.getScope() == EntityScopeTypeEndpoint {
+			measureGenerator.registerServiceEndpointTraffic(serviceNames[0], subEntityName)
 		}
 		measureName := scaler.schema.GetName()
 		// if the access log is related to the traffic, then just ignore it, because the register will send them
@@ -479,7 +517,7 @@ func (b *measureDataGenerator) adjustTimeFromTime(t time.Time, info *downstreamT
 	}
 }
 
-func (b *measureDataGenerator) registerTraffic(trafficName string, counter *int64, tp entityScopeType, generator func() *measurev1.WriteRequest) {
+func (b *measureDataGenerator) registerTraffic(trafficName string, counter *int64, tp EntityScopeType, generator func() *measurev1.WriteRequest) {
 	b.trafficRegisterLock.RLock()
 	_, exist := b.trafficRegister[trafficName]
 	b.trafficRegisterLock.RUnlock()
@@ -509,7 +547,7 @@ func (b *measureDataGenerator) registerTraffic(trafficName string, counter *int6
 }
 
 func (b *measureDataGenerator) registerServiceEndpointTraffic(serviceName, endpointName string) {
-	b.registerTraffic(fmt.Sprintf("%s/%s", serviceName, endpointName), &b.trafficCounterEndpoint, entityScopeTypeEndpoint, func() *measurev1.WriteRequest {
+	b.registerTraffic(fmt.Sprintf("%s/%s", serviceName, endpointName), &b.trafficCounterEndpoint, EntityScopeTypeEndpoint, func() *measurev1.WriteRequest {
 		now := time.Now()
 		format := now.Format("200601021504")
 		timeBucket, err := strconv.ParseInt(format, 10, 64)
@@ -543,7 +581,7 @@ func (b *measureDataGenerator) registerServiceEndpointTraffic(serviceName, endpo
 }
 
 func (b *measureDataGenerator) registerServiceInstanceTraffic(serviceName, instanceName string) {
-	b.registerTraffic(fmt.Sprintf("%s/%s", serviceName, instanceName), &b.trafficCounterInstance, entityScopeTypeServiceInstance, func() *measurev1.WriteRequest {
+	b.registerTraffic(fmt.Sprintf("%s/%s", serviceName, instanceName), &b.trafficCounterInstance, EntityScopeTypeServiceInstance, func() *measurev1.WriteRequest {
 		now := time.Now()
 		format := now.Format("200601021504")
 		timeBucket, err := strconv.ParseInt(format, 10, 64)
@@ -578,7 +616,7 @@ func (b *measureDataGenerator) registerServiceInstanceTraffic(serviceName, insta
 }
 
 func (b *measureDataGenerator) registerServiceTraffic(serviceName string) {
-	b.registerTraffic(serviceName, &b.trafficCounterService, entityScopeTypeService, func() *measurev1.WriteRequest {
+	b.registerTraffic(serviceName, &b.trafficCounterService, EntityScopeTypeService, func() *measurev1.WriteRequest {
 		now := time.Now()
 		return &measurev1.WriteRequest{
 			Metadata: &commonv1.Metadata{
@@ -621,7 +659,7 @@ func (b *measureDataGenerator) start() {
 
 func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo) {
 	// sending the traffic data again to make sure the traffic data is always exist
-	requests := b.trafficRequests[entityScopeTypeServiceInstance]
+	requests := b.trafficRequests[EntityScopeTypeServiceInstance]
 	for _, r := range requests {
 		for _ = range 4 {
 			req := proto.Clone(r).(*measurev1.WriteRequest)
@@ -629,7 +667,7 @@ func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo
 			b.trafficChannel <- r
 		}
 	}
-	requests = b.trafficRequests[entityScopeTypeEndpoint]
+	requests = b.trafficRequests[EntityScopeTypeEndpoint]
 	for _, r := range requests {
 		for _ = range 4 {
 			req := proto.Clone(r).(*measurev1.WriteRequest)
@@ -649,8 +687,8 @@ type streamDataGenerator struct {
 	schema map[string]*StreamSchema
 }
 
-func newStreamDataGenerator(path string, scaleServiceCount, requestChannelSize int, schemas map[string]*StreamSchema, measureGenerator *measureDataGenerator) (*streamDataGenerator, error) {
-	generator, err := newBaseGenerator[*streamv1.WriteRequest](path, scaleServiceCount, requestChannelSize, func() *streamv1.WriteRequest {
+func newStreamDataGenerator(path string, scaleCounts *scalerCounts, requestChannelSize int, schemas map[string]*StreamSchema, measureGenerator *measureDataGenerator) (*streamDataGenerator, error) {
+	generator, err := newBaseGenerator[*streamv1.WriteRequest](path, scaleCounts, requestChannelSize, func() *streamv1.WriteRequest {
 		return &streamv1.WriteRequest{}
 	}, func(request *streamv1.WriteRequest) schema[*streamv1.WriteRequest] {
 		return schemas[request.Metadata.Name]
@@ -661,7 +699,7 @@ func newStreamDataGenerator(path string, scaleServiceCount, requestChannelSize i
 		default:
 		}
 		return nil, false
-	}, func(scaler *dataScaler[*streamv1.WriteRequest], serviceNames []string, request *streamv1.WriteRequest, downstream *downstreamTimeInfo) bool {
+	}, func(scaler *dataScaler[*streamv1.WriteRequest], serviceNames []string, subEntity string, request *streamv1.WriteRequest, downstream *downstreamTimeInfo) bool {
 		for _, serviceName := range serviceNames {
 			measureGenerator.registerServiceTraffic(serviceName)
 		}

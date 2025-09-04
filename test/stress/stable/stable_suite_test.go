@@ -38,6 +38,7 @@ import (
 )
 
 var (
+	kubeInCluster     = envBool("BANYANDB_KUBE_IN_CLUSTER", false)
 	kubeConfigPath    = envString("BANYANDB_KUBE_CONFIG", filepath.Join(os.TempDir(), "banyandb-stable-suite1.config"))
 	deployKindCluster = envBool("BANYANDB_KIND_CREATE_CLUSTER", true)
 	// kubeConfigPath       = clientcmd.RecommendedHomeFile.
@@ -49,9 +50,11 @@ var (
 	banyanDBImageRepo          = envString("BANYANDB_DEPLOY_IMAGE_REPO", "ghcr.io/apache/skywalking-banyandb")
 	banyanDBImageTag           = envString("BANYANDB_DEPLOY_IMAGE_TAG", "c4000531c0db7f14393ed899f363e35d38e1c824")
 	deleteKindClusterAfterTest = envBool("BANYAHNDB_KIND_DELETE_AFTER_TEST", false)
-	clientCount                = envInt("BANYANDB_TEST_CLIENT_COUNT", 1)          // total number of client count for sending the stream and measure data to the liaison node
-	measureBulkSize            = envInt("BANYANDB_TEST_MEASURE_BULK_SUZE", 2000)  // number of measures in each write request
-	scaleServiceCount          = envInt("BANYANDB_TEST_SCALE_SERVICE_COUNT", 100) // each service will scale to how many services count
+	clientCount                = envInt("BANYANDB_TEST_CLIENT_COUNT", 1)           // total number of client count for sending the stream and measure data to the liaison node
+	measureBulkSize            = envInt("BANYANDB_TEST_MEASURE_BULK_SUZE", 2000)   // number of measures in each write request
+	scaleServiceCount          = envInt("BANYANDB_TEST_SCALE_SERVICE_COUNT", 50)   // each service will scale to how many services count
+	scaleInstanceCount         = envInt("BANYANDB_TEST_SCALE_INSTANCE_COUNT", 20)  // each service will scale to how many instances count
+	scaleEndpointCount         = envInt("BANYANDB_TEST_SCALE_ENDPOINT_COUNT", 100) // each instance will scale to how many endpoints count
 	totalBenchmarkTime         = envDuration("BANYANDB_TEST_DURATION", time.Hour)
 
 	k8sClient              *kubernetes.Clientset
@@ -71,22 +74,30 @@ var _ = g.BeforeSuite(func() {
 	kindClusterFile, err := filepath.Abs("kind.yaml")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	if deployKindCluster {
-		fmt.Println("Creating kind cluster, config:", kubeConfigPath)
-		args := []string{
-			"create", "cluster",
-			"--name", "banyandb-stable-suite1",
-			"--config", kindClusterFile,
-			"--kubeconfig", kubeConfigPath,
+	var config *rest.Config
+	if kubeInCluster {
+		config, err = rest.InClusterConfig()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	} else {
+		if deployKindCluster {
+			fmt.Println("Creating kind cluster, config:", kubeConfigPath)
+			args := []string{
+				"create", "cluster",
+				"--name", "banyandb-stable-suite1",
+				"--config", kindClusterFile,
+				"--kubeconfig", kubeConfigPath,
+			}
+			err = kind.Run(kindcmd.NewLogger(), kindcmd.StandardIOStreams(), args)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
-		err = kind.Run(kindcmd.NewLogger(), kindcmd.StandardIOStreams(), args)
+
+		err = os.Setenv("KUBECONFIG", kubeConfigPath)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		config, err = clientcmd.BuildConfigFromFlags("", kubeConfigPath)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
-	err = os.Setenv("KUBECONFIG", kubeConfigPath)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	config, err := clientcmd.BuildConfigFromFlags("", kubeConfigPath)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	k8sClient, err = kubernetes.NewForConfig(config)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	kubeConfigYaml, err := os.ReadFile(kubeConfigPath)
@@ -120,8 +131,11 @@ var _ = g.Describe("Stable", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Starting the data generators
-		measureGenerator, err := newMeasureDataGenerator(measureAccessLogPath, scaleServiceCount,
-			measureBulkSize*clientCount*5, measureSchemas)
+		measureGenerator, err := newMeasureDataGenerator(measureAccessLogPath, &scalerCounts{
+			service:  scaleServiceCount,
+			instance: scaleInstanceCount,
+			endpoint: scaleEndpointCount,
+		}, measureBulkSize*clientCount*5, measureSchemas)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		//streamGenerator, err := newStreamDataGenerator(streamAccessLogPath, scaleServiceCount,
 		//	measureBulkSize*clientCount*5, streamSchemas, measureGenerator)
@@ -233,8 +247,10 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 	err := createClient()
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	flush := func(newClient bool) error {
-		if errClose := client.CloseSend(); errClose != nil {
-			return fmt.Errorf("failed to close send: %w", errClose)
+		if client != nil {
+			if errClose := client.CloseSend(); errClose != nil {
+				return fmt.Errorf("failed to close send: %w", errClose)
+			}
 		}
 		if !newClient {
 			return nil
@@ -474,7 +490,7 @@ func runningInstallClusterScript() {
 	fmt.Println("Running the install cluster script", scriptPath)
 	cmd := exec.Command(scriptPath, shellRunningBaseDir, banyanDBImageRepo, banyanDBImageTag,
 		banyanDBValuesPath, banyanDBNS, prometheusValuesPath, grafanaValuesPath)
-	cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeConfigPath)
+	cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeConfigPath, "http_proxy=http://127.0.0.1:7890", "https_proxy=http://127.0.0.1:7890")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err = cmd.Run()

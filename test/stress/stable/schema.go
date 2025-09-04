@@ -19,18 +19,18 @@ import (
 	streamv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/stream/v1"
 )
 
-type entityScopeType int
+type EntityScopeType int
 
 const (
-	entityScopeTypeService entityScopeType = iota
-	entityScopeTypeServiceInstance
-	entityScopeTypeEndpoint
+	EntityScopeTypeService EntityScopeType = iota
+	EntityScopeTypeServiceInstance
+	EntityScopeTypeEndpoint
 	entityScopeTypeServiceRelation
 	entityScopeTypeServiceInstanceRelation
 	entityScopeTypeEndpointRelation
 )
 
-func (e entityScopeType) isRelation() bool {
+func (e EntityScopeType) isRelation() bool {
 	return e == entityScopeTypeServiceRelation || e == entityScopeTypeServiceInstanceRelation ||
 		e == entityScopeTypeEndpointRelation
 }
@@ -52,11 +52,11 @@ const (
 )
 
 var (
-	entityNameSets = map[string]entityScopeType{
-		"service_name":                entityScopeTypeService,
+	entityNameSets = map[string]EntityScopeType{
+		"service_name":                EntityScopeTypeService,
 		"source_service_name":         entityScopeTypeServiceRelation,
 		"dest_service_name":           entityScopeTypeServiceRelation,
-		"local_endpoint_service_name": entityScopeTypeService,
+		"local_endpoint_service_name": EntityScopeTypeService,
 		"source_name":                 entityScopeTypeServiceRelation,
 		"dest_name":                   entityScopeTypeServiceRelation,
 	}
@@ -68,11 +68,11 @@ var (
 		"source_name":         entityRelationFromTypeSource,
 		"dest_name":           entityRelationFromTypeDest,
 	}
-	entityIDSets = map[string]entityScopeType{
-		"service_id":          entityScopeTypeService,
+	entityIDSets = map[string]EntityScopeType{
+		"service_id":          EntityScopeTypeService,
 		"source_service_id":   entityScopeTypeServiceRelation,
 		"dest_service_id":     entityScopeTypeServiceRelation,
-		"service_instance_id": entityScopeTypeServiceInstance,
+		"service_instance_id": EntityScopeTypeServiceInstance,
 	}
 )
 
@@ -85,7 +85,7 @@ const (
 
 type entityIDField struct {
 	index        int
-	scope        entityScopeType
+	scope        EntityScopeType
 	relationType entityRelationFromType // if the scope is relation, indicate its source or dest
 	value        entityValueType
 	tp           entityIDFieldType
@@ -99,11 +99,12 @@ type EntityIDFieldValue struct {
 
 type schema[T proto.Message] interface {
 	GetServiceName(T) ([]string, error)
-	GetRelatedFieldValues(T) []*EntityIDFieldValue
-	getScope() entityScopeType
-	ApplyFieldChange(T, []string, *EntityIDFieldValue)
+	GetRelatedFieldValues(T) (subEntity *EntityIDFieldValue, all []*EntityIDFieldValue)
+	getScope() EntityScopeType
+	ApplyFieldChange(T, []string, string, *EntityIDFieldValue)
 	GetName() string
 	GetType() schemaType
+	getBaseSchema() *baseSchema
 }
 
 type schemaType int
@@ -114,15 +115,17 @@ const (
 )
 
 type baseSchema struct {
-	serviceField     *entityIDField
-	destServiceField *entityIDField
-	name             string
-	relatedFields    []*entityIDField
-	scope            entityScopeType
+	serviceFieldInx     int
+	destServiceFieldInx int
+	name                string
+	relatedFields       []*entityIDField
+	scope               EntityScopeType
 }
 
 func (b *baseSchema) initEntities(name string, tp schemaType, tags []*databasev1.TagFamilySpec, fields []*databasev1.FieldSpec) {
 	b.name = name
+	b.serviceFieldInx = -1
+	b.destServiceFieldInx = -1
 	b.generateEntityScope(name)
 	for inx, tag := range tags {
 		for subInx, t := range tag.Tags {
@@ -140,7 +143,7 @@ func (b *baseSchema) initEntities(name string, tp schemaType, tags []*databasev1
 }
 
 func (b *baseSchema) generateEntityScope(name string) {
-	var scope entityScopeType
+	var scope EntityScopeType
 	switch {
 	case strings.Contains(name, "service_relation_"),
 		strings.HasPrefix(name, "tcp_service_client_"),
@@ -156,7 +159,7 @@ func (b *baseSchema) generateEntityScope(name string) {
 		scope = entityScopeTypeServiceInstanceRelation
 
 	case strings.HasPrefix(name, "endpoint_"):
-		scope = entityScopeTypeEndpoint
+		scope = EntityScopeTypeEndpoint
 
 	case strings.HasPrefix(name, "envoy_"),
 		strings.HasPrefix(name, "instance_"),
@@ -164,15 +167,15 @@ func (b *baseSchema) generateEntityScope(name string) {
 		strings.HasPrefix(name, "satellite_service_"),
 		strings.HasPrefix(name, "service_instance_"),
 		strings.HasPrefix(name, "tcp_service_instance_"):
-		scope = entityScopeTypeServiceInstance
+		scope = EntityScopeTypeServiceInstance
 
 	default:
-		scope = entityScopeTypeService
+		scope = EntityScopeTypeService
 	}
 	b.scope = scope
 }
 
-func (b *baseSchema) getScope() entityScopeType {
+func (b *baseSchema) getScope() EntityScopeType {
 	return b.scope
 }
 
@@ -181,50 +184,50 @@ func (b *baseSchema) appendField(f *entityIDField, entityName string) {
 		panic(fmt.Errorf("found wrong schema scope analysis: %s", entityName))
 	}
 	b.relatedFields = append(b.relatedFields, f)
-	if f.scope == entityScopeTypeService {
-		b.serviceField = b.settingServiceField(b.serviceField, f)
+	if f.scope == EntityScopeTypeService {
+		b.serviceFieldInx = b.settingServiceField(b.serviceFieldInx, len(b.relatedFields)-1)
 	} else if f.scope.isRelation() {
 		if f.relationType == entityRelationFromTypeSource {
-			b.serviceField = b.settingServiceField(b.serviceField, f)
+			b.serviceFieldInx = b.settingServiceField(b.serviceFieldInx, len(b.relatedFields)-1)
 		} else if f.relationType == entityRelationFromTypeDest {
-			b.destServiceField = b.settingServiceField(b.destServiceField, f)
+			b.destServiceFieldInx = b.settingServiceField(b.destServiceFieldInx, len(b.relatedFields)-1)
 		}
 	}
 }
 
-func (b *baseSchema) settingServiceField(original *entityIDField, updated *entityIDField) *entityIDField {
-	if original == nil {
+func (b *baseSchema) settingServiceField(original int, updated int) int {
+	if original < 0 {
 		return updated
 	}
 	// if the existing service field is entity_id, and the new one is entity_name, replace it
 	// service name have more chance to be the entity identifier
-	if original.value == entityValueTypeID && updated.value == entityValueTypeName {
+	if b.relatedFields[original].value == entityValueTypeID && b.relatedFields[updated].value == entityValueTypeName {
 		return updated
 	}
 	return original
 }
 
-func (b *baseSchema) generateFieldValue(generatedServiceName []string, fv *EntityIDFieldValue) string {
+func (b *baseSchema) generateFieldValue(generatedServiceName []string, subEntityName string, fv *EntityIDFieldValue) string {
 	switch fv.field.scope {
-	case entityScopeTypeService:
+	case EntityScopeTypeService:
 		if fv.field.value == entityValueTypeID {
 			return base64.StdEncoding.EncodeToString([]byte(generatedServiceName[0])) + ".1"
 		} else if fv.field.value == entityValueTypeName {
 			return generatedServiceName[0]
 		}
-	case entityScopeTypeServiceInstance:
+	case EntityScopeTypeServiceInstance:
 		if fv.field.value == entityValueTypeID {
 			return fmt.Sprintf("%s.1_%s", base64.StdEncoding.EncodeToString([]byte(generatedServiceName[0])),
-				fv.Value)
+				base64.StdEncoding.EncodeToString([]byte(subEntityName)))
 		} else {
-			return fv.Value
+			return subEntityName
 		}
-	case entityScopeTypeEndpoint:
+	case EntityScopeTypeEndpoint:
 		if fv.field.value == entityValueTypeID {
 			return fmt.Sprintf("%s.1_%s", base64.StdEncoding.EncodeToString([]byte(generatedServiceName[0])),
-				fv.Value)
+				base64.StdEncoding.EncodeToString([]byte(subEntityName)))
 		} else {
-			return fv.Value
+			return subEntityName
 		}
 	case entityScopeTypeServiceRelation:
 		if fv.field.value == entityValueTypeID {
@@ -257,50 +260,56 @@ func (b *baseSchema) generateFieldValue(generatedServiceName []string, fv *Entit
 	return ""
 }
 
-func (b *baseSchema) getRelatedFieldValues(tags []*modelv1.TagFamilyForWrite, fields []*modelv1.FieldValue) []*EntityIDFieldValue {
+func (b *baseSchema) getRelatedFieldValues(tags []*modelv1.TagFamilyForWrite, fields []*modelv1.FieldValue) (*EntityIDFieldValue, []*EntityIDFieldValue) {
 	result := make([]*EntityIDFieldValue, 0, len(b.relatedFields))
+	var subEntity *EntityIDFieldValue
 	for _, f := range b.relatedFields {
 		var val string
-		if f.scope == entityScopeTypeService || f.scope.isRelation() {
+		if f.scope.isRelation() || f.scope == EntityScopeTypeService {
+			// service name and relation(only service relation support)no need to analysis
 			result = append(result, &EntityIDFieldValue{field: f})
 			continue
 		}
 
-		if f.tp == entityIDFieldTypeTag {
-			tag := tags[f.index].Tags[f.subIndex]
-			val = tag.Value.(*modelv1.TagValue_Str).Str.Value
-		} else if f.tp == entityIDFieldTypeField {
-			field := fields[f.index]
-			val = field.Value.(*modelv1.FieldValue_Str).Str.Value
-		}
+		val = b.findValue(f, tags, fields)
 		if f.value == entityValueTypeID {
 			switch f.scope {
-			case entityScopeTypeServiceInstance:
+			case EntityScopeTypeServiceInstance:
 				// for service instance, the format is {serviceId}_{base64(instance_name)}
 				_, after, found := strings.Cut(val, "_")
 				if !found {
 					panic(fmt.Sprintf("invalid entity id field: %s", val))
 				}
-				val = after
-			case entityScopeTypeEndpoint:
+				name, err := base64.StdEncoding.DecodeString(after)
+				if err != nil {
+					panic(fmt.Sprintf("service instance name base64 decode failed: %s", after))
+				}
+				val = string(name)
+			case EntityScopeTypeEndpoint:
 				// for endpoint, the format is {serviceId}_{base64(endpoint_name)}
 				_, after, found := strings.Cut(val, "_")
 				if !found {
 					panic(fmt.Sprintf("invalid entity id field: %s", val))
 				}
-				val = after
+				name, err := base64.StdEncoding.DecodeString(after)
+				if err != nil {
+					panic(fmt.Sprintf("service instance name base64 decode failed: %s", after))
+				}
+				val = string(name)
 			default:
 				panic(fmt.Sprintf("unknown field scope: %d", f.scope))
 			}
 		}
-		if val != "" {
-			result = append(result, &EntityIDFieldValue{
-				field: f,
-				Value: val,
-			})
+		fv := &EntityIDFieldValue{
+			field: f,
+			Value: val,
+		}
+		result = append(result, fv)
+		if f.scope == EntityScopeTypeServiceInstance || f.scope == EntityScopeTypeEndpoint {
+			subEntity = fv
 		}
 	}
-	return result
+	return subEntity, result
 }
 
 func (b *baseSchema) buildEntityIDField(entityType schemaType, tp entityIDFieldType, inx, subIndex int, fName string) *entityIDField {
@@ -324,12 +333,12 @@ func (b *baseSchema) buildEntityIDField(entityType schemaType, tp entityIDFieldT
 		}
 	}
 	// special case for service_traffic_measure or related metrics
-	if fName == "name" && b.scope == entityScopeTypeService && entityType == schemaTypeMeasure {
+	if fName == "name" && entityType == schemaTypeMeasure {
 		return &entityIDField{
 			tp:       tp,
 			index:    inx,
 			subIndex: subIndex,
-			scope:    entityScopeTypeService,
+			scope:    b.scope,
 			value:    entityValueTypeName,
 		}
 	}
@@ -352,7 +361,7 @@ func (b *baseSchema) buildEntityIDField(entityType schemaType, tp entityIDFieldT
 	return nil
 }
 
-func (b *baseSchema) handleRelationFrom(fName string, scope entityScopeType) entityRelationFromType {
+func (b *baseSchema) handleRelationFrom(fName string, scope EntityScopeType) entityRelationFromType {
 	if scope == entityScopeTypeServiceRelation || scope == entityScopeTypeEndpointRelation || scope == entityScopeTypeServiceInstanceRelation {
 		if fromType, found := entityRelationSets[fName]; found {
 			return fromType
@@ -364,18 +373,18 @@ func (b *baseSchema) handleRelationFrom(fName string, scope entityScopeType) ent
 func (b *baseSchema) findServiceName(tags []*modelv1.TagFamilyForWrite, fields []*modelv1.FieldValue) ([]string, error) {
 	// handling relation
 	if b.scope.isRelation() {
-		if b.serviceField == nil || b.destServiceField == nil {
+		if b.serviceFieldInx < 0 || b.destServiceFieldInx < 0 {
 			return nil, fmt.Errorf("relation entity should have both source and dest service field: %s", b.name)
 		}
 		return []string{
-			b.fetchValueAsName(b.serviceField, tags, fields),
-			b.fetchValueAsName(b.destServiceField, tags, fields),
+			b.fetchValueAsName(b.relatedFields[b.serviceFieldInx], tags, fields),
+			b.fetchValueAsName(b.relatedFields[b.destServiceFieldInx], tags, fields),
 		}, nil
 	}
-	if b.serviceField == nil {
+	if b.serviceFieldInx < 0 {
 		return nil, fmt.Errorf("entity should have both source and dest service field: %s", b.name)
 	}
-	return []string{b.fetchValueAsName(b.serviceField, tags, fields)}, nil
+	return []string{b.fetchValueAsName(b.relatedFields[b.serviceFieldInx], tags, fields)}, nil
 }
 
 func (b *baseSchema) fetchValueAsName(field *entityIDField, tags []*modelv1.TagFamilyForWrite, fields []*modelv1.FieldValue) string {
@@ -404,6 +413,49 @@ func (b *baseSchema) fetchValueAsName(field *entityIDField, tags []*modelv1.TagF
 	return ""
 }
 
+func (b *baseSchema) findValue(f *entityIDField, tags []*modelv1.TagFamilyForWrite, fields []*modelv1.FieldValue) string {
+	if f.tp == entityIDFieldTypeTag {
+		tag := tags[f.index].Tags[f.subIndex]
+		return tag.Value.(*modelv1.TagValue_Str).Str.Value
+	} else if f.tp == entityIDFieldTypeField {
+		field := fields[f.index]
+		return field.Value.(*modelv1.FieldValue_Str).Str.Value
+	}
+	panic(fmt.Errorf("invalid entity id format: %d", f.tp))
+}
+
+func (b *baseSchema) serviceNameByIndexOfField(idVal string, fieldInx int, tags []*modelv1.TagFamilyForWrite, fields []*modelv1.FieldValue) string {
+	if b.relatedFields[fieldInx].value == entityValueTypeName {
+		return b.findValue(b.relatedFields[fieldInx], tags, fields)
+	}
+	// for service, the format is {base64(service_name)}.1
+	before, _, found := strings.Cut(idVal, ".")
+	if !found {
+		panic(fmt.Errorf("invalid service id format: %s", idVal))
+	}
+	decodeString, err := base64.StdEncoding.DecodeString(before)
+	if err != nil {
+		panic(fmt.Sprintf("service name base64 decode failed: %s", before))
+	}
+	return string(decodeString)
+}
+
+func (b *baseSchema) generateServiceName(baseNames []string, sequence int) []string {
+	result := make([]string, len(baseNames))
+	for i, n := range baseNames {
+		result[i] = fmt.Sprintf("%s-%d", n, sequence)
+	}
+	return result
+}
+
+func (b *baseSchema) generateInstanceName(_ string, instanceBaseName string, sequence int) string {
+	return fmt.Sprintf("%s-%d", instanceBaseName, sequence)
+}
+
+func (b *baseSchema) generateEndpointName(_ string, endpointBaseName string, sequence int) string {
+	return fmt.Sprintf("%s-%d", endpointBaseName, sequence)
+}
+
 type MeasureSchema struct {
 	schema *databasev1.Measure
 	baseSchema
@@ -429,18 +481,26 @@ func (b *MeasureSchema) GetType() schemaType {
 	return schemaTypeMeasure
 }
 
-func (b *MeasureSchema) ApplyFieldChange(request *measurev1.WriteRequest, generatedServiceName []string, fv *EntityIDFieldValue) {
+func (b *MeasureSchema) ApplyFieldChange(request *measurev1.WriteRequest, generatedServiceName []string, subEntity string, fv *EntityIDFieldValue) {
 	if fv.field.tp == entityIDFieldTypeTag {
 		tag := request.DataPoint.TagFamilies[fv.field.index].Tags[fv.field.subIndex]
-		tag.Value = &modelv1.TagValue_Str{Str: &modelv1.Str{Value: b.baseSchema.generateFieldValue(generatedServiceName, fv)}}
+		tag.Value = &modelv1.TagValue_Str{Str: &modelv1.Str{Value: b.baseSchema.generateFieldValue(generatedServiceName, subEntity, fv)}}
 	} else if fv.field.tp == entityIDFieldTypeField {
 		field := request.DataPoint.Fields[fv.field.index]
-		field.Value = &modelv1.FieldValue_Str{Str: &modelv1.Str{Value: b.baseSchema.generateFieldValue(generatedServiceName, fv)}}
+		field.Value = &modelv1.FieldValue_Str{Str: &modelv1.Str{Value: b.baseSchema.generateFieldValue(generatedServiceName, subEntity, fv)}}
 	}
 }
 
-func (b *MeasureSchema) GetRelatedFieldValues(request *measurev1.WriteRequest) []*EntityIDFieldValue {
+func (b *MeasureSchema) GetRelatedFieldValues(request *measurev1.WriteRequest) (*EntityIDFieldValue, []*EntityIDFieldValue) {
 	return b.baseSchema.getRelatedFieldValues(request.DataPoint.TagFamilies, request.DataPoint.Fields)
+}
+
+func (b *MeasureSchema) GetScope() EntityScopeType {
+	return b.scope
+}
+
+func (b *MeasureSchema) getBaseSchema() *baseSchema {
+	return &b.baseSchema
 }
 
 type StreamSchema struct {
@@ -468,17 +528,21 @@ func (s *StreamSchema) GetType() schemaType {
 	return schemaTypeStream
 }
 
-func (s *StreamSchema) ApplyFieldChange(request *streamv1.WriteRequest, generatedServiceName []string, fv *EntityIDFieldValue) {
+func (s *StreamSchema) ApplyFieldChange(request *streamv1.WriteRequest, generatedServiceName []string, subEntity string, fv *EntityIDFieldValue) {
 	if fv.field.tp == entityIDFieldTypeTag {
 		tag := request.Element.TagFamilies[fv.field.index].Tags[fv.field.subIndex]
-		tag.Value = &modelv1.TagValue_Str{Str: &modelv1.Str{Value: s.generateFieldValue(generatedServiceName, fv)}}
+		tag.Value = &modelv1.TagValue_Str{Str: &modelv1.Str{Value: s.generateFieldValue(generatedServiceName, subEntity, fv)}}
 	} else if fv.field.tp == entityIDFieldTypeField {
 		panic("stream schema should not have field type entity ID")
 	}
 }
 
-func (s *StreamSchema) GetRelatedFieldValues(request *streamv1.WriteRequest) []*EntityIDFieldValue {
+func (s *StreamSchema) GetRelatedFieldValues(request *streamv1.WriteRequest) (*EntityIDFieldValue, []*EntityIDFieldValue) {
 	return s.baseSchema.getRelatedFieldValues(request.Element.TagFamilies, nil)
+}
+
+func (s *StreamSchema) getBaseSchema() *baseSchema {
+	return &s.baseSchema
 }
 
 func InitializeAllSchema(conn *grpc.ClientConn, dataDir string) (map[string]*StreamSchema, map[string]*MeasureSchema, error) {
