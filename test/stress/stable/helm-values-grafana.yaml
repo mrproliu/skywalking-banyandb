@@ -1,0 +1,25 @@
+replicas: 1
+
+adminPassword: admin
+
+plugins: []
+
+sidecar:
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+    labelValue: "1"
+    folder: /var/lib/grafana/dashboards/kubernetes
+  datasources:
+    enabled: true
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: prometheus
+        type: prometheus
+        access: proxy
+        url: http://prom-prometheus-server.monitoring.svc.cluster.local
+        isDefault: true
+        uid: prometheus
