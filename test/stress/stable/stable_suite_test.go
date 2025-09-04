@@ -116,19 +116,19 @@ var _ = g.Describe("Stable", func() {
 		connections := installCluster()
 
 		// using the first one for the schema initialization
-		streamSchemas, measureSchemas, err := InitializeAllSchema(connections[0], schemaDir)
+		_, measureSchemas, err := InitializeAllSchema(connections[0], schemaDir)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Starting the data generators
 		measureGenerator, err := newMeasureDataGenerator(measureAccessLogPath, scaleServiceCount,
 			measureBulkSize*clientCount*5, measureSchemas)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		streamGenerator, err := newStreamDataGenerator(streamAccessLogPath, scaleServiceCount,
-			measureBulkSize*clientCount*5, streamSchemas, measureGenerator)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		//streamGenerator, err := newStreamDataGenerator(streamAccessLogPath, scaleServiceCount,
+		//	measureBulkSize*clientCount*5, streamSchemas, measureGenerator)
+		//gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// starting the batch write
-		startBatchWrite(connections, measureGenerator, streamGenerator, totalBenchmarkTime)
+		startBatchWrite(connections, measureGenerator, nil, totalBenchmarkTime)
 
 		// closing the connections
 		for i := range connections {
@@ -167,14 +167,14 @@ func startBatchWrite(
 			startMeasureWrite(ctx, inx, conn, measureGenerator, s)
 		}(i, connections[i], statics[i])
 
-		go func(inx int, conn *grpc.ClientConn, s *clientStatics) {
-			allClientStarted.Done()
-			defer func() {
-				streamClientDone.Done()
-				g.GinkgoRecover()
-			}()
-			startStreamWrite(ctx, inx, conn, streamGenerator, s)
-		}(i, connections[i], statics[i])
+		//go func(inx int, conn *grpc.ClientConn, s *clientStatics) {
+		//	allClientStarted.Done()
+		//	defer func() {
+		//		streamClientDone.Done()
+		//		g.GinkgoRecover()
+		//	}()
+		//	startStreamWrite(ctx, inx, conn, streamGenerator, s)
+		//}(i, connections[i], statics[i])
 	}
 
 	allClientStarted.Wait()
