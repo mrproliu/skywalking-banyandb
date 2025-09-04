@@ -153,7 +153,7 @@ func startBatchWrite(
 	var measureClientDone sync.WaitGroup
 	var streamClientDone sync.WaitGroup
 	var allClientStarted sync.WaitGroup
-	allClientStarted.Add(len(connections) * 2)
+	allClientStarted.Add(len(connections))
 	statics := make([]*clientStatics, len(connections))
 	for i := range connections {
 		measureClientDone.Add(1)
