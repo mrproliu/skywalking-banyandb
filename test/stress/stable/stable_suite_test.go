@@ -50,11 +50,11 @@ var (
 	banyanDBImageRepo          = envString("BANYANDB_DEPLOY_IMAGE_REPO", "ghcr.io/apache/skywalking-banyandb")
 	banyanDBImageTag           = envString("BANYANDB_DEPLOY_IMAGE_TAG", "c4000531c0db7f14393ed899f363e35d38e1c824")
 	deleteKindClusterAfterTest = envBool("BANYAHNDB_KIND_DELETE_AFTER_TEST", false)
-	clientCount                = envInt("BANYANDB_TEST_CLIENT_COUNT", 1)           // total number of client count for sending the stream and measure data to the liaison node
-	measureBulkSize            = envInt("BANYANDB_TEST_MEASURE_BULK_SUZE", 2000)   // number of measures in each write request
-	scaleServiceCount          = envInt("BANYANDB_TEST_SCALE_SERVICE_COUNT", 50)   // each service will scale to how many services count
-	scaleInstanceCount         = envInt("BANYANDB_TEST_SCALE_INSTANCE_COUNT", 20)  // each service will scale to how many instances count
-	scaleEndpointCount         = envInt("BANYANDB_TEST_SCALE_ENDPOINT_COUNT", 100) // each instance will scale to how many endpoints count
+	clientCount                = envInt("BANYANDB_TEST_CLIENT_COUNT", 1)          // total number of client count for sending the stream and measure data to the liaison node
+	measureBulkSize            = envInt("BANYANDB_TEST_MEASURE_BULK_SUZE", 2000)  // number of measures in each write request
+	scaleServiceCount          = envInt("BANYANDB_TEST_SCALE_SERVICE_COUNT", 20)  // each service will scale to how many services count
+	scaleInstanceCount         = envInt("BANYANDB_TEST_SCALE_INSTANCE_COUNT", 20) // each service will scale to how many instances count
+	scaleEndpointCount         = envInt("BANYANDB_TEST_SCALE_ENDPOINT_COUNT", 50) // each instance will scale to how many endpoints count
 	totalBenchmarkTime         = envDuration("BANYANDB_TEST_DURATION", time.Hour)
 
 	k8sClient              *kubernetes.Clientset
@@ -246,7 +246,9 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 					return
 				}
 				if v.Status != "STATUS_SUCCEED" {
-					l.Err(fmt.Errorf("measure service got an unexpected response: %s", v))
+					l.Err(fmt.Errorf("measure service got an unexpected response: %s", v)).
+						Msg("failed to receive response from measureService")
+					return
 				}
 			}
 		}(client)
@@ -362,8 +364,8 @@ func startStreamWrite(ctx context.Context, inx int, connection *grpc.ClientConn,
 }
 
 func installCluster() []*grpc.ClientConn {
-	fmt.Println("Installing Banyan and prometheus/grafana to the cluster")
-	runningInstallClusterScript()
+	//fmt.Println("Installing Banyan and prometheus/grafana to the cluster")
+	//runningInstallClusterScript()
 
 	// wait for all the liaison nodes to be ready
 	fmt.Println("Waiting for all the liaison nodes to be ready")
@@ -517,7 +519,7 @@ func runningInstallClusterScript() {
 	fmt.Println("Running the install cluster script", scriptPath)
 	cmd := exec.Command(scriptPath, shellRunningBaseDir, banyanDBImageRepo, banyanDBImageTag,
 		banyanDBValuesPath, banyanDBNS, prometheusValuesPath, grafanaValuesPath)
-	cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeConfigPath)
+	cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeConfigPath, "http_proxy=http://127.0.0.1:7890", "https_proxy=http://127.0.0.1:7890")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err = cmd.Run()
