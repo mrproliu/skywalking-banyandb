@@ -61,6 +61,9 @@ var (
 	k8sRestConfig          *rest.Config
 	forwardPortStopChannel = make(chan struct{}, 1)
 	logsCollector          *logCollector
+	liaisonGRPCPort        int32
+	allLiaisonPodName      []string
+	allConnection          []*grpc.ClientConn
 )
 
 func TestStable(t *testing.T) {
@@ -120,6 +123,9 @@ var _ = g.AfterSuite(func() {
 	if logsCollector != nil {
 		logsCollector.stop()
 	}
+	for _, c := range allConnection {
+		_ = c.Close()
+	}
 })
 
 var _ = g.Describe("Stable", func() {
@@ -145,11 +151,6 @@ var _ = g.Describe("Stable", func() {
 
 		// starting the batch write
 		startBatchWrite(connections, measureGenerator, nil, totalBenchmarkTime)
-
-		// closing the connections
-		for i := range connections {
-			gomega.Expect(connections[i].Close()).To(gomega.Succeed())
-		}
 	})
 })
 
@@ -223,6 +224,10 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 	l := logger.GetLogger(fmt.Sprintf("measure-client-%d", inx))
 	c := measurev1.NewMeasureServiceClient(connection)
 	var client grpc.BidiStreamingClient[measurev1.WriteRequest, measurev1.WriteResponse]
+	newConnectionClient := func() {
+		connection = popNewConnection()
+		c = measurev1.NewMeasureServiceClient(connection)
+	}
 	createClient := func() error {
 		var err error
 		client, err = c.Write(ctx)
@@ -269,13 +274,13 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 		default:
 			if errSend := client.Send(generator.take()); errSend != nil {
 				l.Err(errSend).Msg("failed to send measure")
-				waitFlushSuccess(flush)
+				waitFlushSuccess(newConnectionClient, flush)
 				continue
 			}
 			if s.incMeasureWriteCount()%int64(measureBulkSize) == 0 {
 				if errFlush := flush(true); errFlush != nil {
 					l.Err(errFlush).Msg("failed to flush measure")
-					waitFlushSuccess(flush)
+					waitFlushSuccess(newConnectionClient, flush)
 					continue
 				}
 				time.Sleep(time.Millisecond * 10)
@@ -284,13 +289,14 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 	}
 }
 
-func waitFlushSuccess(flush func(newClient bool) error) {
+func waitFlushSuccess(newConnectionClient func(), flush func(newClient bool) error) {
 	for {
+		time.Sleep(time.Second * 3)
+		newConnectionClient()
 		errFlush := flush(true)
 		if errFlush == nil {
 			return
 		}
-		time.Sleep(time.Second * 1)
 	}
 }
 
@@ -419,58 +425,74 @@ func installCluster() []*grpc.ClientConn {
 		}
 	}
 	gomega.Expect(grpcPort).NotTo(gomega.BeZero())
-
-	allPodAddresses := make([]string, 0, len(allLiaisonNodeReady))
+	liaisonGRPCPort = grpcPort
 	for podName := range allLiaisonNodeReady {
-		roundTripper, upgrader, err := spdy.RoundTripperFor(k8sRestConfig)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", banyanDBNS, podName)
-		hostIP := k8sRestConfig.Host
-		serverURL := hostIP + path
-
-		req, err := http.NewRequest(http.MethodPost, serverURL, nil)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-		var stdout bytes.Buffer
-		var stderr bytes.Buffer
-		readyChannel := make(chan struct{}, 1)
-		forwardErrorChannel := make(chan error, 1)
-
-		fmt.Println("Ready to port-forward liaison", podName, "grpc port", grpcPort, "to localhost")
-		dialer := spdy.NewDialer(upgrader, &http.Client{Transport: roundTripper}, "POST", req.URL)
-		forwarder, err := portforward.New(dialer, []string{fmt.Sprintf(":%d", grpcPort)}, forwardPortStopChannel, readyChannel,
-			bufio.NewWriter(&stdout), bufio.NewWriter(&stderr))
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		go func() {
-			defer g.GinkgoRecover()
-			err = forwarder.ForwardPorts()
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		}()
-
-		select {
-		case <-readyChannel:
-			ports, err := forwarder.GetPorts()
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			gomega.Expect(len(ports)).To(gomega.BeNumerically("==", 1))
-			localPort := ports[0].Local
-			fmt.Printf("Liaison Pod %s/%s grpc port %d is forwarded to localhost on port %d\n",
-				banyanDBNS, podName, grpcPort, localPort)
-			allPodAddresses = append(allPodAddresses, fmt.Sprintf("localhost:%d", localPort))
-		case forwardErr := <-forwardErrorChannel:
-			gomega.Expect(forwardErr).NotTo(gomega.HaveOccurred())
-		}
+		allLiaisonPodName = append(allLiaisonPodName, podName)
 	}
 
-	result := make([]*grpc.ClientConn, 0, len(allLiaisonNodeReady))
+	result := make([]*grpc.ClientConn, 0, clientCount)
 	targetWithCount := make(map[string]int)
-	for i := range clientCount {
-		conn, err := grpc.NewClient(allPodAddresses[i%len(allPodAddresses)], grpc.WithTransportCredentials(insecure.NewCredentials()))
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		result = append(result, conn)
-		targetWithCount[allPodAddresses[i%len(allPodAddresses)]]++
+	for _ = range clientCount {
+		conn := popNewConnection()
+		targetWithCount[conn.Target()]++
 	}
 	fmt.Println("Total Initialized gRPC connections for parallel write:", len(result), "with target address and connection count:", targetWithCount)
 	return result
+}
+
+func popNewConnection() *grpc.ClientConn {
+	nextInx := len(allConnection) % len(allLiaisonPodName)
+	if kubeInCluster {
+		conn, err := grpc.NewClient(fmt.Sprintf("%s:%d", allLiaisonPodName[nextInx], liaisonGRPCPort), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		allConnection = append(allConnection, conn)
+		return conn
+	}
+
+	podName := allLiaisonPodName[nextInx]
+	roundTripper, upgrader, err := spdy.RoundTripperFor(k8sRestConfig)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", banyanDBNS, podName)
+	hostIP := k8sRestConfig.Host
+	serverURL := hostIP + path
+
+	req, err := http.NewRequest(http.MethodPost, serverURL, nil)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	readyChannel := make(chan struct{}, 1)
+	forwardErrorChannel := make(chan error, 1)
+
+	fmt.Println("Ready to port-forward liaison", podName, "grpc port", liaisonGRPCPort, "to localhost")
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: roundTripper}, "POST", req.URL)
+	forwarder, err := portforward.New(dialer, []string{fmt.Sprintf(":%d", liaisonGRPCPort)}, forwardPortStopChannel, readyChannel,
+		bufio.NewWriter(&stdout), bufio.NewWriter(&stderr))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	go func() {
+		defer g.GinkgoRecover()
+		err = forwarder.ForwardPorts()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	}()
+
+	var grpcAddress string
+	select {
+	case <-readyChannel:
+		ports, err := forwarder.GetPorts()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(len(ports)).To(gomega.BeNumerically("==", 1))
+		localPort := ports[0].Local
+		fmt.Printf("Liaison Pod %s/%s grpc port %d is forwarded to localhost on port %d\n",
+			banyanDBNS, podName, liaisonGRPCPort, localPort)
+		grpcAddress = fmt.Sprintf("localhost:%d", localPort)
+	case forwardErr := <-forwardErrorChannel:
+		gomega.Expect(forwardErr).NotTo(gomega.HaveOccurred())
+	}
+
+	conn, err := grpc.NewClient(grpcAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	allConnection = append(allConnection, conn)
+	return conn
 }
 
 func runningInstallClusterScript() {
