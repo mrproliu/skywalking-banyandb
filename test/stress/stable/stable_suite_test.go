@@ -267,6 +267,13 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 		}
 		return createClient()
 	}
+
+	generator.notifyNormalWriteFinishRound(func() {
+		if errFlush := flush(true); err != nil {
+			l.Err(errFlush).Msg("failed to force flush measure")
+			waitFlushSuccess(newConnectionClient, flush)
+		}
+	})
 	for {
 		select {
 		case <-ctx.Done():
