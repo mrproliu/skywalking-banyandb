@@ -442,14 +442,15 @@ func installCluster() []*grpc.ClientConn {
 }
 
 func popNewConnection() *grpc.ClientConn {
-	nextInx := len(allConnection) % len(allLiaisonPodName)
 	if kubeInCluster {
-		conn, err := grpc.NewClient(fmt.Sprintf("%s:%d", allLiaisonPodName[nextInx], liaisonGRPCPort), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient(fmt.Sprintf("%s.%s.svc.cluster.local:%d", "banyandb-grpc", banyanDBNS, liaisonGRPCPort),
+			grpc.WithTransportCredentials(insecure.NewCredentials()))
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		allConnection = append(allConnection, conn)
 		return conn
 	}
 
+	nextInx := len(allConnection) % len(allLiaisonPodName)
 	podName := allLiaisonPodName[nextInx]
 	roundTripper, upgrader, err := spdy.RoundTripperFor(k8sRestConfig)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
