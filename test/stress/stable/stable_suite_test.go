@@ -225,6 +225,7 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 	c := measurev1.NewMeasureServiceClient(connection)
 	var client grpc.BidiStreamingClient[measurev1.WriteRequest, measurev1.WriteResponse]
 	newConnectionClient := func() {
+		_ = connection.Close()
 		connection = popNewConnection()
 		c = measurev1.NewMeasureServiceClient(connection)
 	}
