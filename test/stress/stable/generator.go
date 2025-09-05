@@ -38,6 +38,7 @@ type baseGenerator[Request proto.Message] struct {
 	getSchema           func(Request) schema[Request]
 	getDataFromChannels func(dataChannel chan requestWrapper[Request]) (*requestWrapper[Request], bool)
 	postGenerate        func(scaler *dataScaler[Request], serviceNames []string, subEntityName string, request Request, downstream *downstreamTimeInfo) bool
+	normalWriteFinish   func()
 	currentFile         *os.File
 	cancel              context.CancelFunc
 	scales              *scalerCounts
@@ -141,9 +142,18 @@ func (b *baseGenerator[Request]) generateData(owner generatorCallback) {
 		}
 		b.generateDataFromFileStart(downstream)
 		b.generateDataFromFileStart(downstream)
+		shouldSkipWaitNextMinute = duration > time.Minute
+		for {
+			if len(b.requestChannel) == 0 {
+				break
+			}
+			time.Sleep(time.Millisecond * 100)
+		}
 		duration = time.Now().Sub(start)
 		fmt.Println("write current minute data twice finished, duration:", duration)
-		shouldSkipWaitNextMinute = duration > time.Minute
+		if b.normalWriteFinish != nil {
+			b.normalWriteFinish()
+		}
 
 		downstream.increaseOneMinute()
 	}
@@ -164,6 +174,10 @@ func (b *baseGenerator[Request]) take() Request {
 		}
 		time.Sleep(time.Millisecond * 10)
 	}
+}
+
+func (b *baseGenerator[Request]) notifyNormalWriteFinishRound(f func()) {
+	b.normalWriteFinish = f
 }
 
 func (b *baseGenerator[Request]) getFromChannel() *Request {
