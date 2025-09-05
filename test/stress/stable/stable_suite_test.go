@@ -434,6 +434,7 @@ func installCluster() []*grpc.ClientConn {
 	targetWithCount := make(map[string]int)
 	for _ = range clientCount {
 		conn := popNewConnection()
+		result = append(result, conn)
 		targetWithCount[conn.Target()]++
 	}
 	fmt.Println("Total Initialized gRPC connections for parallel write:", len(result), "with target address and connection count:", targetWithCount)
