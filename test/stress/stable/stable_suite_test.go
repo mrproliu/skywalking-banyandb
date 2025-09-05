@@ -229,13 +229,19 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 		connection = popNewConnection()
 		c = measurev1.NewMeasureServiceClient(connection)
 	}
+	var olderClientFinished chan struct{}
 	createClient := func() error {
 		var err error
 		client, err = c.Write(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to create write client: %w", err)
 		}
+		if olderClientFinished != nil {
+			<-olderClientFinished
+		}
+		olderClientFinished = make(chan struct{}, 1)
 		go func(c grpc.BidiStreamingClient[measurev1.WriteRequest, measurev1.WriteResponse]) {
+			defer close(olderClientFinished)
 			for {
 				v, err := c.Recv()
 				if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) {
