@@ -104,9 +104,9 @@ func (b *baseGenerator[Request]) generateData(owner generatorCallback) {
 	downstream := newCurrentMinuteDownstream()
 	start := time.Now()
 
-	//fast write next 1h data
-	for i := range 60 * 24 * 2 {
-		//for i := range 1 {
+	////fast write next 1h data
+	//for i := range 60 * 24 * 2 {
+	for i := range 1 {
 		fmt.Println("starting fast write next 1 minute data, index: ", i)
 		b.generateDataFromFileStart(downstream)
 		downstream.increaseOneMinute()
@@ -141,7 +141,6 @@ func (b *baseGenerator[Request]) generateData(owner generatorCallback) {
 			owner.afterInitDataRound(downstream)
 		}
 		b.generateDataFromFileStart(downstream)
-		b.generateDataFromFileStart(downstream)
 		shouldSkipWaitNextMinute = duration > time.Minute
 		for {
 			if len(b.requestChannel) == 0 {
@@ -150,7 +149,7 @@ func (b *baseGenerator[Request]) generateData(owner generatorCallback) {
 			time.Sleep(time.Millisecond * 100)
 		}
 		duration = time.Now().Sub(start)
-		fmt.Println("write current minute data twice finished, duration:", duration)
+		fmt.Println("write current minute data finished, duration:", duration)
 		if b.normalWriteFinish != nil {
 			b.normalWriteFinish()
 		}
@@ -675,7 +674,7 @@ func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo
 	// sending the traffic data again to make sure the traffic data is always exist
 	requests := b.trafficRequests[EntityScopeTypeServiceInstance]
 	for _, r := range requests {
-		for _ = range 4 {
+		for _ = range 2 {
 			req := proto.Clone(r).(*measurev1.WriteRequest)
 			b.changeMeasureBasicTimestamp(req, downstream.now)
 			b.trafficChannel <- r
@@ -683,7 +682,7 @@ func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo
 	}
 	requests = b.trafficRequests[EntityScopeTypeEndpoint]
 	for _, r := range requests {
-		for _ = range 4 {
+		for _ = range 2 {
 			req := proto.Clone(r).(*measurev1.WriteRequest)
 			b.changeMeasureBasicTimestamp(req, downstream.now)
 			b.trafficChannel <- r
