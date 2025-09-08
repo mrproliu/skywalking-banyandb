@@ -141,7 +141,6 @@ func (b *baseGenerator[Request]) generateData(owner generatorCallback) {
 			owner.afterInitDataRound(downstream)
 		}
 		b.generateDataFromFileStart(downstream)
-		shouldSkipWaitNextMinute = duration > time.Minute
 		for {
 			if len(b.requestChannel) == 0 {
 				break
@@ -149,6 +148,7 @@ func (b *baseGenerator[Request]) generateData(owner generatorCallback) {
 			time.Sleep(time.Millisecond * 100)
 		}
 		duration = time.Now().Sub(start)
+		shouldSkipWaitNextMinute = duration > time.Minute
 		fmt.Println("write current minute data finished, duration:", duration)
 		if b.normalWriteFinish != nil {
 			b.normalWriteFinish()
