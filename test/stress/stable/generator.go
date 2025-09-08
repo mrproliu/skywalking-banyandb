@@ -690,8 +690,10 @@ func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo
 	}
 
 	// adding the hour and day data
-	b.hourGenerator.generateDataFromFileStart(downstream)
-	b.dayGenerator.generateDataFromFileStart(downstream)
+	if downstream.now.Minute()%2 == 0 {
+		b.hourGenerator.generateDataFromFileStart(downstream)
+		b.dayGenerator.generateDataFromFileStart(downstream)
+	}
 }
 
 type streamDataGenerator struct {
