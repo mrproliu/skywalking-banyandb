@@ -9,6 +9,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -83,7 +84,43 @@ const (
 	entityIDFieldTypeField
 )
 
-type entityIDField struct {
+type attrFields struct {
+	attrs [6]*entityField
+}
+
+func (a *attrFields) applyChanges(tagFamilies []*modelv1.TagFamilyForWrite, service string) {
+	name := parseServiceName(service)
+	if name.highLevelService || name.unknownService {
+		return
+	}
+	if name.hostnameService {
+		tagFamilies[a.attrs[0].index].Tags[a.attrs[0].subIndex].Value =
+			&modelv1.TagValue_Str{Str: &modelv1.Str{Value: "hostname"}}
+		tagFamilies[a.attrs[1].index].Tags[a.attrs[1].subIndex].Value =
+			&modelv1.TagValue_Str{Str: &modelv1.Str{Value: name.hostname}}
+		tagFamilies[a.attrs[2].index].Tags[a.attrs[2].subIndex].Value =
+			&modelv1.TagValue_Str{Str: &modelv1.Str{Value: name.service}}
+		tagFamilies[a.attrs[3].index].Tags[a.attrs[3].subIndex].Value =
+			&modelv1.TagValue_Str{Str: &modelv1.Str{Value: name.cluster}}
+		tagFamilies[a.attrs[4].index].Tags[a.attrs[4].subIndex].Value =
+			&modelv1.TagValue_Str{Str: &modelv1.Str{Value: name.env}}
+	} else {
+		tagFamilies[a.attrs[0].index].Tags[a.attrs[0].subIndex].Value =
+			&modelv1.TagValue_Str{Str: &modelv1.Str{Value: "service"}}
+		tagFamilies[a.attrs[1].index].Tags[a.attrs[1].subIndex].Value =
+			&modelv1.TagValue_Str{Str: &modelv1.Str{Value: name.subset}}
+		tagFamilies[a.attrs[2].index].Tags[a.attrs[2].subIndex].Value =
+			&modelv1.TagValue_Str{Str: &modelv1.Str{Value: name.service}}
+		tagFamilies[a.attrs[3].index].Tags[a.attrs[3].subIndex].Value =
+			&modelv1.TagValue_Str{Str: &modelv1.Str{Value: name.namespace}}
+		tagFamilies[a.attrs[4].index].Tags[a.attrs[4].subIndex].Value =
+			&modelv1.TagValue_Str{Str: &modelv1.Str{Value: name.cluster}}
+		tagFamilies[a.attrs[5].index].Tags[a.attrs[5].subIndex].Value =
+			&modelv1.TagValue_Str{Str: &modelv1.Str{Value: name.env}}
+	}
+}
+
+type entityField struct {
 	index        int
 	scope        EntityScopeType
 	relationType entityRelationFromType // if the scope is relation, indicate its source or dest
@@ -92,19 +129,20 @@ type entityIDField struct {
 	subIndex     int // when the type is tag, subIndex is the index in the tag family
 }
 
-type EntityIDFieldValue struct {
-	field *entityIDField
+type EntityFieldValue struct {
+	field *entityField
 	Value string
 }
 
 type schema[T proto.Message] interface {
 	GetServiceName(T) ([]string, error)
-	GetRelatedFieldValues(T) (subEntity *EntityIDFieldValue, all []*EntityIDFieldValue)
+	GetRelatedFieldValues(T) (subEntity *EntityFieldValue, all []*EntityFieldValue)
 	getScope() EntityScopeType
-	ApplyFieldChange(T, []string, string, *EntityIDFieldValue)
+	ApplyFieldChange(T, []string, string, *EntityFieldValue)
 	GetName() string
 	GetType() schemaType
 	getBaseSchema() *baseSchema
+	getAttrFields() *attrFields
 }
 
 type schemaType int
@@ -118,8 +156,9 @@ type baseSchema struct {
 	serviceFieldInx     int
 	destServiceFieldInx int
 	name                string
-	relatedFields       []*entityIDField
+	relatedFields       []*entityField
 	scope               EntityScopeType
+	attrFields          *attrFields
 }
 
 func (b *baseSchema) initEntities(name string, tp schemaType, tags []*databasev1.TagFamilySpec, fields []*databasev1.FieldSpec) {
@@ -131,6 +170,23 @@ func (b *baseSchema) initEntities(name string, tp schemaType, tags []*databasev1
 		for subInx, t := range tag.Tags {
 			if field := b.buildEntityIDField(tp, entityIDFieldTypeTag, inx, subInx, t.Name); field != nil {
 				b.appendField(field, name)
+			} else if strings.HasPrefix(t.Name, "attr") {
+				if b.attrFields == nil {
+					b.attrFields = &attrFields{}
+				}
+				inxStr, ok := strings.CutPrefix(t.Name, "attr")
+				if !ok {
+					panic("invalid attr field name: " + t.Name)
+				}
+				attrInx, err := strconv.ParseInt(inxStr, 0, 64)
+				if err != nil || attrInx < 0 || attrInx >= int64(len(b.attrFields.attrs)) {
+					panic("invalid attr field name: " + t.Name)
+				}
+				b.attrFields.attrs[attrInx] = &entityField{
+					tp:       entityIDFieldTypeTag,
+					index:    inx,
+					subIndex: subInx,
+				}
 			}
 		}
 	}
@@ -179,7 +235,7 @@ func (b *baseSchema) getScope() EntityScopeType {
 	return b.scope
 }
 
-func (b *baseSchema) appendField(f *entityIDField, entityName string) {
+func (b *baseSchema) appendField(f *entityField, entityName string) {
 	if f.scope.isRelation() && !b.scope.isRelation() {
 		panic(fmt.Errorf("found wrong schema scope analysis: %s", entityName))
 	}
@@ -207,7 +263,7 @@ func (b *baseSchema) settingServiceField(original int, updated int) int {
 	return original
 }
 
-func (b *baseSchema) generateFieldValue(generatedServiceName []string, subEntityName string, fv *EntityIDFieldValue) string {
+func (b *baseSchema) generateFieldValue(generatedServiceName []string, subEntityName string, fv *EntityFieldValue) string {
 	switch fv.field.scope {
 	case EntityScopeTypeService:
 		if fv.field.value == entityValueTypeID {
@@ -260,14 +316,14 @@ func (b *baseSchema) generateFieldValue(generatedServiceName []string, subEntity
 	return ""
 }
 
-func (b *baseSchema) getRelatedFieldValues(tags []*modelv1.TagFamilyForWrite, fields []*modelv1.FieldValue) (*EntityIDFieldValue, []*EntityIDFieldValue) {
-	result := make([]*EntityIDFieldValue, 0, len(b.relatedFields))
-	var subEntity *EntityIDFieldValue
+func (b *baseSchema) getRelatedFieldValues(tags []*modelv1.TagFamilyForWrite, fields []*modelv1.FieldValue) (*EntityFieldValue, []*EntityFieldValue) {
+	result := make([]*EntityFieldValue, 0, len(b.relatedFields))
+	var subEntity *EntityFieldValue
 	for _, f := range b.relatedFields {
 		var val string
 		if f.scope.isRelation() || f.scope == EntityScopeTypeService {
 			// service name and relation(only service relation support)no need to analysis
-			result = append(result, &EntityIDFieldValue{field: f})
+			result = append(result, &EntityFieldValue{field: f})
 			continue
 		}
 
@@ -300,7 +356,7 @@ func (b *baseSchema) getRelatedFieldValues(tags []*modelv1.TagFamilyForWrite, fi
 				panic(fmt.Sprintf("unknown field scope: %d", f.scope))
 			}
 		}
-		fv := &EntityIDFieldValue{
+		fv := &EntityFieldValue{
 			field: f,
 			Value: val,
 		}
@@ -312,9 +368,9 @@ func (b *baseSchema) getRelatedFieldValues(tags []*modelv1.TagFamilyForWrite, fi
 	return subEntity, result
 }
 
-func (b *baseSchema) buildEntityIDField(entityType schemaType, tp entityIDFieldType, inx, subIndex int, fName string) *entityIDField {
+func (b *baseSchema) buildEntityIDField(entityType schemaType, tp entityIDFieldType, inx, subIndex int, fName string) *entityField {
 	if level, ok := entityNameSets[fName]; ok {
-		return &entityIDField{
+		return &entityField{
 			tp:           tp,
 			index:        inx,
 			subIndex:     subIndex,
@@ -323,7 +379,7 @@ func (b *baseSchema) buildEntityIDField(entityType schemaType, tp entityIDFieldT
 			relationType: b.handleRelationFrom(fName, level),
 		}
 	} else if l, ok := entityIDSets[fName]; ok {
-		return &entityIDField{
+		return &entityField{
 			tp:           tp,
 			index:        inx,
 			subIndex:     subIndex,
@@ -334,7 +390,7 @@ func (b *baseSchema) buildEntityIDField(entityType schemaType, tp entityIDFieldT
 	}
 	// special case for service_traffic_measure or related metrics
 	if fName == "name" && entityType == schemaTypeMeasure {
-		return &entityIDField{
+		return &entityField{
 			tp:       tp,
 			index:    inx,
 			subIndex: subIndex,
@@ -345,7 +401,7 @@ func (b *baseSchema) buildEntityIDField(entityType schemaType, tp entityIDFieldT
 	// if using entity_id as the entity identifier,
 	// then it's dependent on the name of measure/stream
 	if fName == "entity_id" {
-		field := &entityIDField{
+		field := &entityField{
 			tp:       tp,
 			index:    inx,
 			subIndex: subIndex,
@@ -387,7 +443,7 @@ func (b *baseSchema) findServiceName(tags []*modelv1.TagFamilyForWrite, fields [
 	return []string{b.fetchValueAsName(b.relatedFields[b.serviceFieldInx], tags, fields)}, nil
 }
 
-func (b *baseSchema) fetchValueAsName(field *entityIDField, tags []*modelv1.TagFamilyForWrite, fields []*modelv1.FieldValue) string {
+func (b *baseSchema) fetchValueAsName(field *entityField, tags []*modelv1.TagFamilyForWrite, fields []*modelv1.FieldValue) string {
 	var val string
 	if field.tp == entityIDFieldTypeTag {
 		tag := tags[field.index].Tags[field.subIndex]
@@ -413,7 +469,7 @@ func (b *baseSchema) fetchValueAsName(field *entityIDField, tags []*modelv1.TagF
 	return ""
 }
 
-func (b *baseSchema) findValue(f *entityIDField, tags []*modelv1.TagFamilyForWrite, fields []*modelv1.FieldValue) string {
+func (b *baseSchema) findValue(f *entityField, tags []*modelv1.TagFamilyForWrite, fields []*modelv1.FieldValue) string {
 	if f.tp == entityIDFieldTypeTag {
 		tag := tags[f.index].Tags[f.subIndex]
 		return tag.Value.(*modelv1.TagValue_Str).Str.Value
@@ -440,10 +496,19 @@ func (b *baseSchema) serviceNameByIndexOfField(idVal string, fieldInx int, tags 
 	return string(decodeString)
 }
 
-func (b *baseSchema) generateServiceName(baseNames []string, sequence int) []string {
-	result := make([]string, len(baseNames))
-	for i, n := range baseNames {
-		result[i] = fmt.Sprintf("%s-%d", n, sequence)
+func (b *baseSchema) generateServiceName(baseNames []*serviceName, scales *scalerCounts) [][]string {
+	result := make([][]string, 0, scales.cluster*scales.service)
+	for clusterInx := range scales.cluster {
+		for serviceInx := range scales.service {
+			serviceNames := make([]string, 0, len(baseNames))
+			for _, service := range baseNames {
+				serviceNames = append(serviceNames, service.toService(
+					fmt.Sprintf("%s-%d", service.cluster, clusterInx),
+					fmt.Sprintf("%s-%d", service.service, serviceInx),
+				))
+			}
+			result = append(result, serviceNames)
+		}
 	}
 	return result
 }
@@ -481,7 +546,7 @@ func (b *MeasureSchema) GetType() schemaType {
 	return schemaTypeMeasure
 }
 
-func (b *MeasureSchema) ApplyFieldChange(request *measurev1.WriteRequest, generatedServiceName []string, subEntity string, fv *EntityIDFieldValue) {
+func (b *MeasureSchema) ApplyFieldChange(request *measurev1.WriteRequest, generatedServiceName []string, subEntity string, fv *EntityFieldValue) {
 	if fv.field.tp == entityIDFieldTypeTag {
 		tag := request.DataPoint.TagFamilies[fv.field.index].Tags[fv.field.subIndex]
 		tag.Value = &modelv1.TagValue_Str{Str: &modelv1.Str{Value: b.baseSchema.generateFieldValue(generatedServiceName, subEntity, fv)}}
@@ -489,9 +554,13 @@ func (b *MeasureSchema) ApplyFieldChange(request *measurev1.WriteRequest, genera
 		field := request.DataPoint.Fields[fv.field.index]
 		field.Value = &modelv1.FieldValue_Str{Str: &modelv1.Str{Value: b.baseSchema.generateFieldValue(generatedServiceName, subEntity, fv)}}
 	}
+
+	if (b.scope == EntityScopeTypeService || b.scope == EntityScopeTypeEndpoint) && b.getAttrFields() != nil {
+		b.getAttrFields().applyChanges(request.DataPoint.TagFamilies, generatedServiceName[0])
+	}
 }
 
-func (b *MeasureSchema) GetRelatedFieldValues(request *measurev1.WriteRequest) (*EntityIDFieldValue, []*EntityIDFieldValue) {
+func (b *MeasureSchema) GetRelatedFieldValues(request *measurev1.WriteRequest) (*EntityFieldValue, []*EntityFieldValue) {
 	return b.baseSchema.getRelatedFieldValues(request.DataPoint.TagFamilies, request.DataPoint.Fields)
 }
 
@@ -501,6 +570,10 @@ func (b *MeasureSchema) GetScope() EntityScopeType {
 
 func (b *MeasureSchema) getBaseSchema() *baseSchema {
 	return &b.baseSchema
+}
+
+func (b *MeasureSchema) getAttrFields() *attrFields {
+	return b.attrFields
 }
 
 type StreamSchema struct {
@@ -528,7 +601,7 @@ func (s *StreamSchema) GetType() schemaType {
 	return schemaTypeStream
 }
 
-func (s *StreamSchema) ApplyFieldChange(request *streamv1.WriteRequest, generatedServiceName []string, subEntity string, fv *EntityIDFieldValue) {
+func (s *StreamSchema) ApplyFieldChange(request *streamv1.WriteRequest, generatedServiceName []string, subEntity string, fv *EntityFieldValue) {
 	if fv.field.tp == entityIDFieldTypeTag {
 		tag := request.Element.TagFamilies[fv.field.index].Tags[fv.field.subIndex]
 		tag.Value = &modelv1.TagValue_Str{Str: &modelv1.Str{Value: s.generateFieldValue(generatedServiceName, subEntity, fv)}}
@@ -537,12 +610,16 @@ func (s *StreamSchema) ApplyFieldChange(request *streamv1.WriteRequest, generate
 	}
 }
 
-func (s *StreamSchema) GetRelatedFieldValues(request *streamv1.WriteRequest) (*EntityIDFieldValue, []*EntityIDFieldValue) {
+func (s *StreamSchema) GetRelatedFieldValues(request *streamv1.WriteRequest) (*EntityFieldValue, []*EntityFieldValue) {
 	return s.baseSchema.getRelatedFieldValues(request.Element.TagFamilies, nil)
 }
 
 func (s *StreamSchema) getBaseSchema() *baseSchema {
 	return &s.baseSchema
+}
+
+func (s *StreamSchema) getAttrFields() *attrFields {
+	return nil
 }
 
 func InitializeAllSchema(conn *grpc.ClientConn, dataDir string) (map[string]*StreamSchema, map[string]*MeasureSchema, error) {
@@ -653,4 +730,74 @@ func readingDirProtoList[T proto.Message](dir string, newElem func() T) ([]T, er
 		out = append(out, elem)
 	}
 	return out, nil
+}
+
+const (
+	serviceNameSplit = "|"
+	ANY              = "*"
+	UNKNOWN          = "UNKNOWN"
+)
+
+type serviceName struct {
+	subset    string
+	service   string
+	namespace string
+	cluster   string
+	env       string
+	hostname  string
+
+	hostnameService  bool
+	unknownService   bool
+	highLevelService bool
+}
+
+func parseServiceName(name string) *serviceName {
+	parts := strings.Split(name, serviceNameSplit)
+	l := len(parts)
+
+	s := &serviceName{}
+
+	switch l {
+	case 5:
+		// subset|service|namespace|cluster|env
+		s.subset = parts[0]
+		s.service = parts[1]
+		s.namespace = parts[2]
+		s.cluster = parts[3]
+		s.env = parts[4]
+		s.unknownService = s.subset == ANY &&
+			s.service == UNKNOWN &&
+			s.namespace == ANY
+	case 4:
+		// hostname|service|cluster|env
+		s.hostname = parts[0]
+		s.service = parts[1]
+		s.cluster = parts[2]
+		s.env = parts[3]
+
+		s.hostnameService = true
+		s.unknownService = s.service == UNKNOWN
+
+	case 3:
+		// service|namespace|cluster
+		s.service = parts[0]
+		s.namespace = parts[1]
+		s.cluster = parts[2]
+
+		s.highLevelService = true
+		s.unknownService = s.service == UNKNOWN && s.namespace == ANY
+	default:
+		panic(fmt.Sprintf("invalid serviceName: %s", name))
+	}
+
+	return s
+}
+
+func (s *serviceName) toService(cluster, service string) string {
+	if s.hostnameService {
+		return strings.Join([]string{s.hostname, service, cluster, s.env}, serviceNameSplit)
+	} else if s.highLevelService {
+		return strings.Join([]string{service, s.namespace, cluster}, serviceNameSplit)
+	}
+	return strings.Join([]string{s.subset, service, s.namespace, cluster, s.env}, serviceNameSplit)
 }

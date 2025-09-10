@@ -291,6 +291,7 @@ func (d *downstreamTimeInfo) increaseOneMinute() {
 }
 
 type scalerCounts struct {
+	cluster  int
 	service  int
 	instance int
 	endpoint int
@@ -300,16 +301,20 @@ type dataScaler[T proto.Message] struct {
 	schema             schema[T]
 	measureReq         T
 	subEntityName      string
-	relatedFieldValues []*EntityIDFieldValue
-	subEntity          *EntityIDFieldValue
+	relatedFieldValues []*EntityFieldValue
+	subEntity          *EntityFieldValue
 	scales             *scalerCounts
-	baseServiceNames   []string
+	baseServiceNames   []*serviceName
 }
 
 func newDataScaler[T proto.Message](schema schema[T], request T, scales *scalerCounts) *dataScaler[T] {
 	baseServiceNames, err := schema.GetServiceName(request)
 	if err != nil {
 		panic(err)
+	}
+	serviceNames := make([]*serviceName, 0, len(baseServiceNames))
+	for _, name := range baseServiceNames {
+		serviceNames = append(serviceNames, parseServiceName(name))
 	}
 	subEntity, all := schema.GetRelatedFieldValues(request)
 	var subEntityName string
@@ -321,7 +326,7 @@ func newDataScaler[T proto.Message](schema schema[T], request T, scales *scalerC
 		measureReq:         request,
 		scales:             scales,
 		subEntity:          subEntity,
-		baseServiceNames:   baseServiceNames,
+		baseServiceNames:   serviceNames,
 		relatedFieldValues: all,
 		subEntityName:      subEntityName,
 	}
@@ -368,13 +373,12 @@ func (d *dataScaler[T]) generate(downstream *downstreamTimeInfo, generator *base
 		}
 		add(data)
 	}
-	for serviceSeq := 0; serviceSeq < d.scales.service; serviceSeq++ {
-		if d.schema.GetType() == schemaTypeMeasure && len(d.baseServiceNames) == 0 {
-			panic(fmt.Sprintf("schema cannot found any service entity: %s", d.schema.GetName()))
-		}
+	if d.schema.GetType() == schemaTypeMeasure && len(d.baseServiceNames) == 0 {
+		panic(fmt.Sprintf("schema cannot found any service entity: %s", d.schema.GetName()))
+	}
 
-		serviceNames := d.schema.getBaseSchema().generateServiceName(d.baseServiceNames, serviceSeq)
-
+	serviceNamesList := d.schema.getBaseSchema().generateServiceName(d.baseServiceNames, d.scales)
+	for _, serviceNames := range serviceNamesList {
 		switch d.schema.getScope() {
 		case EntityScopeTypeServiceInstance:
 			for instanceSeq := 0; instanceSeq < d.scales.instance; instanceSeq++ {

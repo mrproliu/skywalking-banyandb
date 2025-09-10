@@ -48,13 +48,14 @@ var (
 	measureAccessLogPath       = envString("BANYANDB_TEST_MESURE_ACCESSLOG_DIR", "filter/target/measure")
 	streamAccessLogPath        = envString("BANYANDB_TEST_STREAM_ACCESSLOG_FILE", "filter/target/stream/accesslog")
 	banyanDBImageRepo          = envString("BANYANDB_DEPLOY_IMAGE_REPO", "ghcr.io/apache/skywalking-banyandb")
-	banyanDBImageTag           = envString("BANYANDB_DEPLOY_IMAGE_TAG", "c4000531c0db7f14393ed899f363e35d38e1c824")
+	banyanDBImageTag           = envString("BANYANDB_DEPLOY_IMAGE_TAG", "46083529398b73504e9ca929ef367cd1776aef82")
 	deleteKindClusterAfterTest = envBool("BANYAHNDB_KIND_DELETE_AFTER_TEST", false)
-	clientCount                = envInt("BANYANDB_TEST_CLIENT_COUNT", 1)          // total number of client count for sending the stream and measure data to the liaison node
-	measureBulkSize            = envInt("BANYANDB_TEST_MEASURE_BULK_SUZE", 2000)  // number of measures in each write request
-	scaleServiceCount          = envInt("BANYANDB_TEST_SCALE_SERVICE_COUNT", 20)  // each service will scale to how many services count
-	scaleInstanceCount         = envInt("BANYANDB_TEST_SCALE_INSTANCE_COUNT", 20) // each service will scale to how many instances count
-	scaleEndpointCount         = envInt("BANYANDB_TEST_SCALE_ENDPOINT_COUNT", 50) // each instance will scale to how many endpoints count
+	clientCount                = envInt("BANYANDB_TEST_CLIENT_COUNT", 1)         // total number of client count for sending the stream and measure data to the liaison node
+	measureBulkSize            = envInt("BANYANDB_TEST_MEASURE_BULK_SUZE", 2000) // number of measures in each write request
+	scaleClusterCount          = envInt("BANYANDB_TEST_CLUSTER_COUNT", 1)
+	scaleServiceCount          = envInt("BANYANDB_TEST_SCALE_SERVICE_COUNT", 1)  // each service will scale to how many services count
+	scaleInstanceCount         = envInt("BANYANDB_TEST_SCALE_INSTANCE_COUNT", 1) // each service will scale to how many instances count
+	scaleEndpointCount         = envInt("BANYANDB_TEST_SCALE_ENDPOINT_COUNT", 1) // each instance will scale to how many endpoints count
 	totalBenchmarkTime         = envDuration("BANYANDB_TEST_DURATION", time.Hour)
 
 	k8sClient              *kubernetes.Clientset
@@ -140,6 +141,7 @@ var _ = g.Describe("Stable", func() {
 
 		// Starting the data generators
 		measureGenerator, err := newMeasureDataGenerator(measureAccessLogPath, &scalerCounts{
+			cluster:  scaleClusterCount,
 			service:  scaleServiceCount,
 			instance: scaleInstanceCount,
 			endpoint: scaleEndpointCount,
