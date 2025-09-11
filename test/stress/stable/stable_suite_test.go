@@ -139,7 +139,7 @@ var _ = g.Describe("Stable", func() {
 		connections := installCluster()
 
 		// using the first one for the schema initialization
-		_, measureSchemas, err := InitializeAllMetadata(nil, metadataDir)
+		_, measureSchemas, err := InitializeAllMetadata(connections[0], metadataDir)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Starting the data generators
