@@ -502,9 +502,15 @@ func (b *baseSchema) generateServiceName(baseNames []*serviceName, scales *scale
 		for serviceInx := range scales.service {
 			serviceNames := make([]string, 0, len(baseNames))
 			for _, service := range baseNames {
+				clusterName := fmt.Sprintf("%s-%d", service.cluster, clusterInx)
+				if service.cluster == "*" {
+					clusterName = service.cluster
+				}
 				serviceNames = append(serviceNames, service.toService(
-					fmt.Sprintf("%s-%d", service.cluster, clusterInx),
+					service.subset,
+					clusterName,
 					fmt.Sprintf("%s-%d", service.service, serviceInx),
+					service.env,
 				))
 			}
 			result = append(result, serviceNames)
@@ -622,7 +628,19 @@ func (s *StreamSchema) getAttrFields() *attrFields {
 	return nil
 }
 
-func InitializeAllSchema(conn *grpc.ClientConn, dataDir string) (map[string]*StreamSchema, map[string]*MeasureSchema, error) {
+func InitializeAllMetadata(conn *grpc.ClientConn, dataDir string) (map[string]*StreamSchema, map[string]*MeasureSchema, error) {
+	streamSchema, measureSchema, err := initializeAllSchema(conn, filepath.Join(dataDir, "schema"))
+	if err != nil {
+		return nil, nil, err
+	}
+	err = initializeIndexWithTopN(conn, dataDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	return streamSchema, measureSchema, nil
+}
+
+func initializeAllSchema(conn *grpc.ClientConn, schemaDir string) (map[string]*StreamSchema, map[string]*MeasureSchema, error) {
 	// creating all the groups, streams, and measures
 	var groupClient databasev1.GroupRegistryServiceClient
 	var streamClient databasev1.StreamRegistryServiceClient
@@ -632,9 +650,9 @@ func InitializeAllSchema(conn *grpc.ClientConn, dataDir string) (map[string]*Str
 		streamClient = databasev1.NewStreamRegistryServiceClient(conn)
 		measureClient = databasev1.NewMeasureRegistryServiceClient(conn)
 	}
-	groupDir := filepath.Join(dataDir, "groups")
-	streamDir := filepath.Join(dataDir, "streams")
-	measureDir := filepath.Join(dataDir, "measures")
+	groupDir := filepath.Join(schemaDir, "groups")
+	streamDir := filepath.Join(schemaDir, "streams")
+	measureDir := filepath.Join(schemaDir, "measures")
 	groups, err := readingDirProtoList(groupDir, func() *commonv1.Group {
 		return &commonv1.Group{}
 	})
@@ -694,6 +712,82 @@ func InitializeAllSchema(conn *grpc.ClientConn, dataDir string) (map[string]*Str
 	return streamSchemas, measureSchemas, nil
 }
 
+func initializeIndexWithTopN(conn *grpc.ClientConn, dataDir string) error {
+	var indexRuleClient databasev1.IndexRuleRegistryServiceClient
+	var indexRuleBindingClient databasev1.IndexRuleBindingRegistryServiceClient
+	var topNClient databasev1.TopNAggregationRegistryServiceClient
+	if conn != nil {
+		indexRuleClient = databasev1.NewIndexRuleRegistryServiceClient(conn)
+		indexRuleBindingClient = databasev1.NewIndexRuleBindingRegistryServiceClient(conn)
+		topNClient = databasev1.NewTopNAggregationRegistryServiceClient(conn)
+	}
+	indexRuleDir := filepath.Join(dataDir, "index_rules")
+	indexRuleBindingDir := filepath.Join(dataDir, "index_rules_binding")
+	topNDir := filepath.Join(dataDir, "topn")
+
+	// index rules
+	indexRules, err := readingGroupDirProtoList(indexRuleDir, func() *databasev1.IndexRule {
+		return &databasev1.IndexRule{}
+	})
+	if err != nil {
+		return fmt.Errorf("failed to read index rules: %w", err)
+	}
+	for group, rules := range indexRules {
+		for _, r := range rules {
+			if indexRuleClient != nil {
+				_, err = indexRuleClient.Create(context.Background(), &databasev1.IndexRuleRegistryServiceCreateRequest{
+					IndexRule: r,
+				})
+				if err = handlingCreateSchemaResult("IndexRule", fmt.Sprintf("%s/%s", group, r.Metadata.Name), err); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// index rule bindings
+	indexRuleBindings, err := readingGroupDirProtoList(indexRuleBindingDir, func() *databasev1.IndexRuleBinding {
+		return &databasev1.IndexRuleBinding{}
+	})
+	if err != nil {
+		return fmt.Errorf("failed to read index rule bindings: %w", err)
+	}
+	for group, bindings := range indexRuleBindings {
+		for _, b := range bindings {
+			if indexRuleBindingClient != nil {
+				_, err = indexRuleBindingClient.Create(context.Background(), &databasev1.IndexRuleBindingRegistryServiceCreateRequest{
+					IndexRuleBinding: b,
+				})
+				if err = handlingCreateSchemaResult("IndexRuleBinding", fmt.Sprintf("%s/%s", group, b.Metadata.Name), err); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// TopN aggregations
+	topNs, err := readingGroupDirProtoList(topNDir, func() *databasev1.TopNAggregation {
+		return &databasev1.TopNAggregation{}
+	})
+	if err != nil {
+		return fmt.Errorf("failed to read TopN aggregations: %w", err)
+	}
+	for group, tops := range topNs {
+		for _, t := range tops {
+			if topNClient != nil {
+				_, err = topNClient.Create(context.Background(), &databasev1.TopNAggregationRegistryServiceCreateRequest{
+					TopNAggregation: t,
+				})
+				if err = handlingCreateSchemaResult("TopNAggregation", fmt.Sprintf("%s/%s", group, t.Metadata.Name), err); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 func handlingCreateSchemaResult(tp, name string, err error) error {
 	if err != nil {
 		if strings.Contains(err.Error(), "resource already exists") {
@@ -705,6 +799,28 @@ func handlingCreateSchemaResult(tp, name string, err error) error {
 		fmt.Println("Created", tp, name)
 	}
 	return nil
+}
+
+func readingGroupDirProtoList[T proto.Message](dir string, newElem func() T) (map[string][]T, error) {
+	out := make(map[string][]T)
+	list, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, node := range list {
+		if !node.IsDir() {
+			continue
+		}
+		groupName := node.Name()
+		groupDir := filepath.Join(dir, groupName)
+		schemas, err := readingDirProtoList(groupDir, newElem)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read group dir %s: %w", groupDir, err)
+		}
+		out[groupName] = schemas
+	}
+	return out, nil
 }
 
 func readingDirProtoList[T proto.Message](dir string, newElem func() T) ([]T, error) {
@@ -733,9 +849,9 @@ func readingDirProtoList[T proto.Message](dir string, newElem func() T) ([]T, er
 }
 
 const (
-	serviceNameSplit = "|"
-	ANY              = "*"
-	UNKNOWN          = "UNKNOWN"
+	serviceNameSplit   = "|"
+	serviceNameAny     = "*"
+	serviceNameUnknown = "UNKNOWN"
 )
 
 type serviceName struct {
@@ -749,13 +865,15 @@ type serviceName struct {
 	hostnameService  bool
 	unknownService   bool
 	highLevelService bool
+
+	original string
 }
 
 func parseServiceName(name string) *serviceName {
 	parts := strings.Split(name, serviceNameSplit)
 	l := len(parts)
 
-	s := &serviceName{}
+	s := &serviceName{original: name}
 
 	switch l {
 	case 5:
@@ -765,9 +883,9 @@ func parseServiceName(name string) *serviceName {
 		s.namespace = parts[2]
 		s.cluster = parts[3]
 		s.env = parts[4]
-		s.unknownService = s.subset == ANY &&
-			s.service == UNKNOWN &&
-			s.namespace == ANY
+		s.unknownService = s.subset == serviceNameAny &&
+			s.service == serviceNameUnknown &&
+			s.namespace == serviceNameAny
 	case 4:
 		// hostname|service|cluster|env
 		s.hostname = parts[0]
@@ -776,7 +894,7 @@ func parseServiceName(name string) *serviceName {
 		s.env = parts[3]
 
 		s.hostnameService = true
-		s.unknownService = s.service == UNKNOWN
+		s.unknownService = s.service == serviceNameUnknown
 
 	case 3:
 		// service|namespace|cluster
@@ -785,7 +903,7 @@ func parseServiceName(name string) *serviceName {
 		s.cluster = parts[2]
 
 		s.highLevelService = true
-		s.unknownService = s.service == UNKNOWN && s.namespace == ANY
+		s.unknownService = s.service == serviceNameUnknown && s.namespace == serviceNameAny
 	default:
 		panic(fmt.Sprintf("invalid serviceName: %s", name))
 	}
@@ -793,11 +911,19 @@ func parseServiceName(name string) *serviceName {
 	return s
 }
 
-func (s *serviceName) toService(cluster, service string) string {
+func (s *serviceName) serviceID() string {
+	return base64.StdEncoding.EncodeToString([]byte(s.original)) + ".1"
+}
+
+func (s *serviceName) toService(subset, cluster, service, env string) string {
 	if s.hostnameService {
-		return strings.Join([]string{s.hostname, service, cluster, s.env}, serviceNameSplit)
+		return strings.Join([]string{s.hostname, service, cluster, env}, serviceNameSplit)
 	} else if s.highLevelService {
 		return strings.Join([]string{service, s.namespace, cluster}, serviceNameSplit)
 	}
-	return strings.Join([]string{s.subset, service, s.namespace, cluster, s.env}, serviceNameSplit)
+	return strings.Join([]string{subset, service, s.namespace, cluster, env}, serviceNameSplit)
+}
+
+func serviceNameToID(n string) string {
+	return base64.StdEncoding.EncodeToString([]byte(n)) + ".1"
 }

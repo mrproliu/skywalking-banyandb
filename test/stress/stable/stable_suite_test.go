@@ -43,7 +43,8 @@ var (
 	deployKindCluster = envBool("BANYANDB_KIND_CREATE_CLUSTER", true)
 	// kubeConfigPath       = clientcmd.RecommendedHomeFile.
 	banyanDBNS                 = envString("BANYANDB_DEPLOY_NS", "banyandb")
-	schemaDir                  = envString("BANYANDB_TEST_SCHEMA_DIR", "testdata/schema")
+	metadataDir                = envString("BANYANDB_TEST_METADATA_DIR", "testdata/metadata")
+	queryDir                   = envString("BANYANDB_TEST_QUERY_DIR", "testdata/query")
 	banyanDBLogs               = envString("BANYANDB_TEST_BANYANDB_LOGS_DIR", "logs")
 	measureAccessLogPath       = envString("BANYANDB_TEST_MESURE_ACCESSLOG_DIR", "filter/target/measure")
 	streamAccessLogPath        = envString("BANYANDB_TEST_STREAM_ACCESSLOG_FILE", "filter/target/stream/accesslog")
@@ -57,6 +58,8 @@ var (
 	scaleInstanceCount         = envInt("BANYANDB_TEST_SCALE_INSTANCE_COUNT", 1) // each service will scale to how many instances count
 	scaleEndpointCount         = envInt("BANYANDB_TEST_SCALE_ENDPOINT_COUNT", 1) // each instance will scale to how many endpoints count
 	totalBenchmarkTime         = envDuration("BANYANDB_TEST_DURATION", time.Hour)
+	queryParallelsCount        = envInt("BANYANDB_TEST_QUERY_PARALLELS_COUNT", 30) // total number of parallels for query execution
+	queryTimes                 = envInt("BANYANDB_TEST_QUERY_TIMES", 50)           // each query will execute how many times
 
 	k8sClient              *kubernetes.Clientset
 	k8sRestConfig          *rest.Config
@@ -136,7 +139,7 @@ var _ = g.Describe("Stable", func() {
 		connections := installCluster()
 
 		// using the first one for the schema initialization
-		_, measureSchemas, err := InitializeAllSchema(connections[0], schemaDir)
+		_, measureSchemas, err := InitializeAllMetadata(nil, metadataDir)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Starting the data generators
@@ -147,10 +150,22 @@ var _ = g.Describe("Stable", func() {
 			endpoint: scaleEndpointCount,
 		}, measureBulkSize*clientCount*5, measureSchemas)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		//streamGenerator, err := newStreamDataGenerator(streamAccessLogPath, scaleServiceCount,
-		//	measureBulkSize*clientCount*5, streamSchemas, measureGenerator)
-		//gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
+		queryExecutor := newMeasureQueryExecutor(queryParallelsCount, queryTimes, measureGenerator,
+			newDashboardServiceQuery(filepath.Join(queryDir, "measure", "dashboardServices.yaml")),
+			newDashboardGatewayServiceQuery(filepath.Join(queryDir, "measure", "dashboardGatewayServices.yaml")),
+			newOrgServiceQuery(filepath.Join(queryDir, "measure", "orgServices.yaml")),
+			newOrgServiceDetailQuery(filepath.Join(queryDir, "measure", "orgServiceDetail.yaml")),
+			newOrgServiceMetricsQuery(filepath.Join(queryDir, "measure", "orgServiceMetrics.yaml")),
+		)
+		measureGenerator.setNormalWriteRoundStart(func() {
+			queryExecutor.executeOnce(measurev1.NewMeasureServiceClient(connections[0]))
+		})
+
+		////streamGenerator, err := newStreamDataGenerator(streamAccessLogPath, scaleServiceCount,
+		////	measureBulkSize*clientCount*5, streamSchemas, measureGenerator)
+		////gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		//
 		// starting the batch write
 		startBatchWrite(connections, measureGenerator, nil, totalBenchmarkTime)
 	})
@@ -208,11 +223,15 @@ func startBatchWrite(
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				fmt.Println("Benchmark write statistics in the last 5 seconds: ", time.Now().Format(time.RFC3339))
-				for _, s := range statics {
+				clientStats := ""
+				for i, s := range statics {
+					if i > 0 {
+						clientStats += ", "
+					}
 					measureWrite, streamWrite := s.cleanAllCounter()
-					fmt.Println("\tclient", s.index, "wrote", measureWrite, "measures", streamWrite, "streams")
+					clientStats += fmt.Sprintf("client %d wrote %d measures, %d streams", s.index, measureWrite, streamWrite)
 				}
+				fmt.Println("Benchmark write statistics in the last 5 seconds: ", time.Now().Format(time.RFC3339), clientStats)
 			}
 		}
 	}()

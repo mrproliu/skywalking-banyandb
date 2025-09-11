@@ -105,7 +105,8 @@ func (b *baseGenerator[Request]) generateData(owner generatorCallback) {
 	start := time.Now()
 
 	////fast write next 1h data
-	for i := range 60 * 24 * 2 {
+	//for i := range 60 * 24 * 2 {
+	for i := range 60 * 20 {
 		//for i := range 1 {
 		fmt.Println("starting fast write next 1 minute data, index: ", i)
 		b.generateDataFromFileStart(downstream)
@@ -426,6 +427,7 @@ type measureDataGenerator struct {
 	trafficCounterInstance int64
 	trafficCounterEndpoint int64
 	trafficRegisterLock    sync.RWMutex
+	normalWriteRoundStart  func()
 
 	hourGenerator *baseGenerator[*measurev1.WriteRequest]
 	dayGenerator  *baseGenerator[*measurev1.WriteRequest]
@@ -519,6 +521,10 @@ func newMeasureDataGenerator(dir string, scales *scalerCounts, requestChannelSiz
 	}
 
 	return measureGenerator, nil
+}
+
+func (b *measureDataGenerator) setNormalWriteRoundStart(f func()) {
+	b.normalWriteRoundStart = f
 }
 
 func (b *measureDataGenerator) adjustTimeFromTime(t time.Time, info *downstreamTimeInfo) time.Time {
@@ -675,6 +681,7 @@ func (b *measureDataGenerator) start() {
 }
 
 func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo) {
+	b.normalWriteRoundStart()
 	// sending the traffic data again to make sure the traffic data is always exist
 	requests := b.trafficRequests[EntityScopeTypeServiceInstance]
 	for _, r := range requests {
