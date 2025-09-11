@@ -159,7 +159,7 @@ var _ = g.Describe("Stable", func() {
 			newOrgServiceMetricsQuery(filepath.Join(queryDir, "measure", "orgServiceMetrics.yaml")),
 		)
 		measureGenerator.setNormalWriteRoundStart(func() {
-			queryExecutor.executeOnce(measurev1.NewMeasureServiceClient(connections[0]))
+			go queryExecutor.execute(measurev1.NewMeasureServiceClient(connections[0]))
 		})
 
 		////streamGenerator, err := newStreamDataGenerator(streamAccessLogPath, scaleServiceCount,

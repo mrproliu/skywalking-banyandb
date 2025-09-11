@@ -54,7 +54,7 @@ type measureQueryExecuteJob struct {
 	req *measurev1.QueryRequest
 }
 
-func (m *measureQueryExecutor) executeOnce(c measurev1.MeasureServiceClient) {
+func (m *measureQueryExecutor) execute(c measurev1.MeasureServiceClient) {
 	invoke := func(v []*measurev1.QueryRequest) []*measurev1.QueryResponse {
 		result := make([]*measurev1.QueryResponse, len(v))
 		queue := make(chan *measureQueryExecuteJob, len(v))
