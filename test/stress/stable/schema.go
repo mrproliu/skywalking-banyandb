@@ -841,7 +841,7 @@ func readingDirProtoList[T proto.Message](dir string, newElem func() T) ([]T, er
 		}
 		elem := newElem()
 		if err := protojson.Unmarshal(data, elem); err != nil {
-			return nil, fmt.Errorf("json->proto doc: %w", err)
+			return nil, fmt.Errorf("json->proto err: file: %s, data: %s, %w", filePath, data, err)
 		}
 		out = append(out, elem)
 	}
