@@ -399,8 +399,8 @@ func startStreamWrite(ctx context.Context, inx int, connection *grpc.ClientConn,
 }
 
 func installCluster() []*grpc.ClientConn {
-	//fmt.Println("Installing Banyan and prometheus/grafana to the cluster")
-	//runningInstallClusterScript()
+	fmt.Println("Installing Banyan and prometheus/grafana to the cluster")
+	runningInstallClusterScript()
 
 	// wait for all the liaison nodes to be ready
 	fmt.Println("Waiting for all the liaison nodes to be ready")
