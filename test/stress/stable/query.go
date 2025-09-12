@@ -134,6 +134,19 @@ func (m *measureQueryExecutor) generateContext() *executeContext {
 	return m.ctx
 }
 
+func (m *executeContext) allService(filter func(name *serviceName) bool) []*serviceName {
+	result := make([]*serviceName, 0)
+	for _, s := range m.services {
+		for _, name := range s.names {
+			if filter(name) {
+				continue
+			}
+			result = append(result, name)
+		}
+	}
+	return result
+}
+
 func (m *executeContext) randomService(count int, filter func(name *serviceName) bool) []*serviceName {
 	result := make([]*serviceName, 0, count)
 	set := make(map[*serviceName]bool)
@@ -434,6 +447,70 @@ func (o *orgServiceMetricsQuery) generate(ctx *executeContext, start, end time.T
 	}
 	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.instanceMetrics, instanceIds, func(q *measurev1.QueryRequest, data string) {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data)
+	}))
+}
+
+type workspacePerformanceQuery struct {
+	topn    []*measurev1.QueryRequest
+	service []*measurev1.QueryRequest
+}
+
+func newWorkspacePerformanceQuery(path string) measureQuery {
+	data := readYamlAsMap(path)
+	return &workspacePerformanceQuery{
+		topn:    queryUnwrapFromAccessLog(data["topn"]),
+		service: queryUnwrapFromAccessLog(data["service"]),
+	}
+}
+
+func (w *workspacePerformanceQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest) []*measurev1.QueryResponse) {
+	allServices := ctx.allService(func(name *serviceName) bool {
+		return name.highLevelService || name.hostnameService || name.unknownService || name.cluster == serviceNameAny ||
+			name.subset != serviceNameAny || name.env == serviceNameAny || !strings.HasPrefix(name.namespace, "dev-")
+	})
+
+	type serviceNameWithoutService struct {
+		env       string
+		cluster   string
+		namespace string
+		subset    string
+	}
+
+	withoutServiceCache := make(map[serviceNameWithoutService]bool)
+	for _, s := range allServices {
+		withoutServiceCache[serviceNameWithoutService{
+			env:       s.env,
+			cluster:   s.cluster,
+			namespace: s.namespace,
+			subset:    s.subset,
+		}] = true
+	}
+	topNArray := make([]*serviceNameWithoutService, 0, len(withoutServiceCache))
+	for k := range withoutServiceCache {
+		topNArray = append(topNArray, &k)
+	}
+
+	// topn query
+	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), w.topn, topNArray, func(q *measurev1.QueryRequest, data *serviceNameWithoutService) {
+		le := queryCriteriaLe(q.Criteria)
+		queryCriteriaCondition(le.Left).Value = queryCriterialStringValue(data.env)
+
+		le = queryCriteriaLe(le.Right)
+		queryCriteriaCondition(le.Left).Value = queryCriterialStringValue(data.cluster)
+
+		le = queryCriteriaLe(le.Right)
+		queryCriteriaCondition(le.Left).Value = queryCriterialStringValue(data.namespace)
+
+		le = queryCriteriaLe(le.Right)
+		queryCriteriaCondition(le.Left).Value = queryCriterialStringValue(data.subset)
+
+		le = queryCriteriaLe(le.Right)
+		queryCriteriaCondition(le.Left).Value = queryCriterialStringValue("service")
+	}))
+
+	// service query
+	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), w.service, allServices, func(q *measurev1.QueryRequest, data *serviceName) {
+		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
 	}))
 }
 
