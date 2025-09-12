@@ -554,7 +554,7 @@ func runningInstallClusterScript() {
 	fmt.Println("Running the install cluster script", scriptPath)
 	cmd := exec.Command(scriptPath, shellRunningBaseDir, banyanDBImageRepo, banyanDBImageTag,
 		banyanDBValuesPath, banyanDBNS, prometheusValuesPath, grafanaValuesPath)
-	cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeConfigPath, "HTTP_PROXY=http://127.0.0.1:7890", "HTTPS_PROXY=http://127.0.0.1:7890")
+	cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeConfigPath /*, "HTTP_PROXY=http://127.0.0.1:7890", "HTTPS_PROXY=http://127.0.0.1:7890"*/)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err = cmd.Run()
