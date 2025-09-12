@@ -812,6 +812,9 @@ func readingGroupDirProtoList[T proto.Message](dir string, newElem func() T) (ma
 		if !node.IsDir() {
 			continue
 		}
+		if strings.HasPrefix(node.Name(), ".") {
+			continue
+		}
 		groupName := node.Name()
 		groupDir := filepath.Join(dir, groupName)
 		schemas, err := readingDirProtoList(groupDir, newElem)
@@ -832,6 +835,9 @@ func readingDirProtoList[T proto.Message](dir string, newElem func() T) ([]T, er
 
 	for _, node := range list {
 		if node.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(node.Name(), ".") {
 			continue
 		}
 		filePath := filepath.Join(dir, node.Name())
