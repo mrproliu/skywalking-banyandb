@@ -58,7 +58,7 @@ var (
 	scaleInstanceCount         = envInt("BANYANDB_TEST_SCALE_INSTANCE_COUNT", 1) // each service will scale to how many instances count
 	scaleEndpointCount         = envInt("BANYANDB_TEST_SCALE_ENDPOINT_COUNT", 1) // each instance will scale to how many endpoints count
 	totalBenchmarkTime         = envDuration("BANYANDB_TEST_DURATION", time.Hour)
-	queryParallelsCount        = envInt("BANYANDB_TEST_QUERY_PARALLELS_COUNT", 30) // total number of parallels for query execution
+	queryParallelsCount        = envInt("BANYANDB_TEST_QUERY_PARALLELS_COUNT", 20) // total number of parallels for query execution
 	queryTimes                 = envInt("BANYANDB_TEST_QUERY_TIMES", 50)           // each query will execute how many times
 
 	k8sClient              *kubernetes.Clientset
@@ -399,8 +399,8 @@ func startStreamWrite(ctx context.Context, inx int, connection *grpc.ClientConn,
 }
 
 func installCluster() []*grpc.ClientConn {
-	fmt.Println("Installing Banyan and prometheus/grafana to the cluster")
-	runningInstallClusterScript()
+	//fmt.Println("Installing Banyan and prometheus/grafana to the cluster")
+	//runningInstallClusterScript()
 
 	// wait for all the liaison nodes to be ready
 	fmt.Println("Waiting for all the liaison nodes to be ready")
@@ -554,7 +554,7 @@ func runningInstallClusterScript() {
 	fmt.Println("Running the install cluster script", scriptPath)
 	cmd := exec.Command(scriptPath, shellRunningBaseDir, banyanDBImageRepo, banyanDBImageTag,
 		banyanDBValuesPath, banyanDBNS, prometheusValuesPath, grafanaValuesPath)
-	cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeConfigPath)
+	cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeConfigPath, "HTTP_PROXY=http://127.0.0.1:7890", "HTTPS_PROXY=http://127.0.0.1:7890")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err = cmd.Run()
