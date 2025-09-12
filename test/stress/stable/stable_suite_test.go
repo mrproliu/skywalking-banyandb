@@ -157,6 +157,7 @@ var _ = g.Describe("Stable", func() {
 			newOrgServiceQuery(filepath.Join(queryDir, "measure", "orgServices.yaml")),
 			newOrgServiceDetailQuery(filepath.Join(queryDir, "measure", "orgServiceDetail.yaml")),
 			newOrgServiceMetricsQuery(filepath.Join(queryDir, "measure", "orgServiceMetrics.yaml")),
+			newWorkspacePerformanceQuery(filepath.Join(queryDir, "measure", "workspacePerformance.yaml")),
 		)
 		measureGenerator.setNormalWriteRoundStart(func() {
 			go queryExecutor.execute(measurev1.NewMeasureServiceClient(connections[0]))
