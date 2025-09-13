@@ -245,25 +245,32 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 	fmt.Println("Starting measure write goroutine:", inx)
 	l := logger.GetLogger(fmt.Sprintf("measure-client-%d", inx))
 	c := measurev1.NewMeasureServiceClient(connection)
-	var client grpc.BidiStreamingClient[measurev1.WriteRequest, measurev1.WriteResponse]
 	newConnectionClient := func() {
 		_ = connection.Close()
 		connection = popNewConnection()
 		c = measurev1.NewMeasureServiceClient(connection)
 	}
-	var olderClientFinished chan struct{}
+	var (
+		mu                  sync.Mutex
+		olderClientFinished <-chan struct{}
+		client              grpc.BidiStreamingClient[measurev1.WriteRequest, measurev1.WriteResponse]
+	)
+
 	createClient := func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		if olderClientFinished != nil {
+			<-olderClientFinished
+		}
 		var err error
 		client, err = c.Write(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to create write client: %w", err)
 		}
-		if olderClientFinished != nil {
-			<-olderClientFinished
-		}
-		olderClientFinished = make(chan struct{}, 1)
+		done := make(chan struct{})
+		olderClientFinished = done
 		go func(c grpc.BidiStreamingClient[measurev1.WriteRequest, measurev1.WriteResponse]) {
-			defer close(olderClientFinished)
+			defer close(done)
 			for {
 				v, err := c.Recv()
 				if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) {
@@ -297,7 +304,7 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 	}
 
 	generator.notifyNormalWriteFinishRound(func() {
-		if errFlush := flush(true); err != nil {
+		if errFlush := flush(true); errFlush != nil {
 			l.Err(errFlush).Msg("failed to force flush measure")
 			waitFlushSuccess(newConnectionClient, flush)
 		}
