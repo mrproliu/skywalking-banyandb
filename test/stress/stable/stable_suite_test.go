@@ -151,17 +151,17 @@ var _ = g.Describe("Stable", func() {
 		}, measureBulkSize*clientCount*5, measureSchemas)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		queryExecutor := newMeasureQueryExecutor(queryParallelsCount, queryTimes, measureGenerator,
-			newDashboardServiceQuery(filepath.Join(queryDir, "measure", "dashboardServices.yaml")),
-			newDashboardGatewayServiceQuery(filepath.Join(queryDir, "measure", "dashboardGatewayServices.yaml")),
-			newOrgServiceQuery(filepath.Join(queryDir, "measure", "orgServices.yaml")),
-			newOrgServiceDetailQuery(filepath.Join(queryDir, "measure", "orgServiceDetail.yaml")),
-			newOrgServiceMetricsQuery(filepath.Join(queryDir, "measure", "orgServiceMetrics.yaml")),
-			newWorkspacePerformanceQuery(filepath.Join(queryDir, "measure", "workspacePerformance.yaml")),
-		)
-		measureGenerator.setNormalWriteRoundStart(func() {
-			go queryExecutor.execute(measurev1.NewMeasureServiceClient(connections[0]))
-		})
+		//queryExecutor := newMeasureQueryExecutor(queryParallelsCount, queryTimes, queryStatsFilePath, measureGenerator,
+		//	newDashboardServiceQuery(filepath.Join(queryDir, "measure", "dashboardServices.yaml")),
+		//	newDashboardGatewayServiceQuery(filepath.Join(queryDir, "measure", "dashboardGatewayServices.yaml")),
+		//	newOrgServiceQuery(filepath.Join(queryDir, "measure", "orgServices.yaml")),
+		//	newOrgServiceDetailQuery(filepath.Join(queryDir, "measure", "orgServiceDetail.yaml")),
+		//	newOrgServiceMetricsQuery(filepath.Join(queryDir, "measure", "orgServiceMetrics.yaml")),
+		//	newWorkspacePerformanceQuery(filepath.Join(queryDir, "measure", "workspacePerformance.yaml")),
+		//)
+		//measureGenerator.setNormalWriteRoundStart(func() {
+		//	go queryExecutor.execute(measurev1.NewMeasureServiceClient(connections[0]))
+		//})
 
 		////streamGenerator, err := newStreamDataGenerator(streamAccessLogPath, scaleServiceCount,
 		////	measureBulkSize*clientCount*5, streamSchemas, measureGenerator)
