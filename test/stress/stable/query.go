@@ -740,7 +740,7 @@ func (q *queryStats) writeQueryResult() {
 	stats := fmt.Sprintf(
 		`Query statics: %s
 empty,error,total count: %d/%d/%d
-min,max,mean,median,p90,p95,p98,p99 duration(nanosecond): %f, %f, %f, %f, %f, %f, %f, %f%s`, time.Now().Format("2006-01-02 15:04:05"),
+min,max,mean,median,p90,p95,p98,p99 duration(millisecond): %f, %f, %f, %f, %f, %f, %f, %f%s`, time.Now().Format("2006-01-02 15:04:05"),
 		atomic.LoadInt64(q.emptyReqCount), atomic.LoadInt64(q.errReqCount), atomic.LoadInt64(q.totalCount),
 		NanoToMillis(minVal), NanoToMillis(maxVal), NanoToMillis(mean), NanoToMillis(median), NanoToMillis(p90),
 		NanoToMillis(p95), NanoToMillis(p98), NanoToMillis(p99), details)
