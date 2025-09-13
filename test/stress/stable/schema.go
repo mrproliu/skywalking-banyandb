@@ -511,7 +511,7 @@ func (b *baseSchema) generateServiceName(baseNames []*serviceName, scales *scale
 					clusterName,
 					fmt.Sprintf("%s-%d", service.service, serviceInx),
 					service.env,
-				))
+				).original)
 			}
 			result = append(result, serviceNames)
 		}
@@ -871,6 +871,7 @@ type serviceName struct {
 	hostnameService  bool
 	unknownService   bool
 	highLevelService bool
+	aggrService      bool
 
 	original string
 }
@@ -892,6 +893,7 @@ func parseServiceName(name string) *serviceName {
 		s.unknownService = s.subset == serviceNameAny &&
 			s.service == serviceNameUnknown &&
 			s.namespace == serviceNameAny
+		s.aggrService = s.subset == serviceNameAny || s.cluster == serviceNameAny || s.env == serviceNameAny
 	case 4:
 		// hostname|service|cluster|env
 		s.hostname = parts[0]
@@ -901,6 +903,7 @@ func parseServiceName(name string) *serviceName {
 
 		s.hostnameService = true
 		s.unknownService = s.service == serviceNameUnknown
+		s.aggrService = s.subset == serviceNameAny || s.cluster == serviceNameAny
 
 	case 3:
 		// service|namespace|cluster
@@ -910,6 +913,7 @@ func parseServiceName(name string) *serviceName {
 
 		s.highLevelService = true
 		s.unknownService = s.service == serviceNameUnknown && s.namespace == serviceNameAny
+		s.aggrService = s.subset == serviceNameAny || s.cluster == serviceNameAny
 	default:
 		panic(fmt.Sprintf("invalid serviceName: %s", name))
 	}
@@ -921,15 +925,11 @@ func (s *serviceName) serviceID() string {
 	return base64.StdEncoding.EncodeToString([]byte(s.original)) + ".1"
 }
 
-func (s *serviceName) toService(subset, cluster, service, env string) string {
+func (s *serviceName) toService(subset, cluster, service, env string) *serviceName {
 	if s.hostnameService {
-		return strings.Join([]string{s.hostname, service, cluster, env}, serviceNameSplit)
+		return parseServiceName(strings.Join([]string{s.hostname, service, cluster, env}, serviceNameSplit))
 	} else if s.highLevelService {
-		return strings.Join([]string{service, s.namespace, cluster}, serviceNameSplit)
+		return parseServiceName(strings.Join([]string{service, s.namespace, cluster}, serviceNameSplit))
 	}
-	return strings.Join([]string{subset, service, s.namespace, cluster, env}, serviceNameSplit)
-}
-
-func serviceNameToID(n string) string {
-	return base64.StdEncoding.EncodeToString([]byte(n)) + ".1"
+	return parseServiceName(strings.Join([]string{subset, service, s.namespace, cluster, env}, serviceNameSplit))
 }
