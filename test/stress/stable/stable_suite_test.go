@@ -297,7 +297,10 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 	}
 	err := createClient()
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	lock := sync.Mutex{}
 	flush := func(newClient bool) error {
+		lock.Lock()
+		defer lock.Unlock()
 		if client != nil {
 			l.Info().Msg("finishing measure write goroutine")
 			if errClose := client.CloseSend(); errClose != nil {
