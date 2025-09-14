@@ -305,10 +305,12 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 	}
 
 	generator.notifyNormalWriteFinishRound(func() {
+		l.Info().Msg("staring flush metrics")
 		if errFlush := flush(true); errFlush != nil {
 			l.Err(errFlush).Msg("failed to force flush measure")
 			waitFlushSuccess(newConnectionClient, flush)
 		}
+		l.Info().Msg("finished flush metrics")
 	})
 	for {
 		select {
