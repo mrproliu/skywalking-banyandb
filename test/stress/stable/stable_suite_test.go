@@ -261,6 +261,7 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 		mu.Lock()
 		defer mu.Unlock()
 		if olderClientFinished != nil {
+			l.Info().Msg("staring to wait client finished")
 			<-olderClientFinished
 		}
 		var err error
@@ -294,11 +295,13 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	flush := func(newClient bool) error {
 		if client != nil {
+			l.Info().Msg("finishing measure write goroutine")
 			if errClose := client.CloseSend(); errClose != nil {
 				return fmt.Errorf("failed to close send: %w", errClose)
 			}
 		}
 		if !newClient {
+			l.Info().Msg("new client false")
 			return nil
 		}
 		return createClient()
