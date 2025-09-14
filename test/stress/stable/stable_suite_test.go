@@ -261,8 +261,9 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 		mu.Lock()
 		defer mu.Unlock()
 		if olderClientFinished != nil {
-			l.Info().Msg("staring to wait client finished")
+			l.Info().Msgf("staring to wait client finished: %p", olderClientFinished)
 			<-olderClientFinished
+			l.Info().Msg("wait client finished successfully")
 		}
 		var err error
 		client, err = c.Write(ctx)
@@ -272,7 +273,10 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 		done := make(chan struct{})
 		olderClientFinished = done
 		go func(c grpc.BidiStreamingClient[measurev1.WriteRequest, measurev1.WriteResponse]) {
-			defer close(done)
+			defer func() {
+				l.Info().Msgf("11wait client finished successfully: %p", done)
+				close(done)
+			}()
 			for {
 				v, err := c.Recv()
 				if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) {
