@@ -105,9 +105,9 @@ func (b *baseGenerator[Request]) generateData(owner generatorCallback) {
 	start := time.Now()
 
 	////fast write next 1h data
-	for i := range 60 * 24 * 3 {
-		//for i := range 60 {
-		//for i := range 1 {
+	//for i := range 60 * 24 * 3 {
+	//for i := range 60 {
+	for i := range 1 {
 		fmt.Println("starting fast write next 1 minute data, index: ", i)
 		b.generateDataFromFileStart(downstream)
 		downstream.increaseOneMinute()
@@ -681,7 +681,9 @@ func (b *measureDataGenerator) start() {
 }
 
 func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo) {
-	b.normalWriteRoundStart()
+	if b.normalWriteRoundStart != nil {
+		b.normalWriteRoundStart()
+	}
 	// sending the traffic data again to make sure the traffic data is always exist
 	requests := b.trafficRequests[EntityScopeTypeServiceInstance]
 	for _, r := range requests {
