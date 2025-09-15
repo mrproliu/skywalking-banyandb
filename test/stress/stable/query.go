@@ -728,10 +728,15 @@ func (q *queryStats) writeQueryResult() {
 			if totalCounts, exist := q.totalCounts[e]; exist {
 				counts = atomic.LoadInt64(totalCounts)
 			}
-			details += fmt.Sprintf("\n\t%s: %d", e, counts)
+			tmp := ""
+			missingCount := int64(0)
 			for entity, c := range i {
-				details += fmt.Sprintf("\n\t\t%s: %d", entity, atomic.LoadInt64(c))
+				val := atomic.LoadInt64(c)
+				tmp += fmt.Sprintf("\n\t\t%s: %d", entity, val)
+				missingCount += val
 			}
+			details += fmt.Sprintf("\n\t%s: total: %d, empty: %d", e, counts, missingCount)
+			details += tmp
 		}
 	}
 	if len(details) > 0 {
