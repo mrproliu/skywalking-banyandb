@@ -44,6 +44,7 @@ type baseGenerator[Request proto.Message] struct {
 	cancel              context.CancelFunc
 	scales              *scalerCounts
 	downstreamLock      sync.RWMutex
+	mode                string
 }
 
 type generatorCallback interface {
@@ -52,6 +53,7 @@ type generatorCallback interface {
 
 func newBaseGenerator[Request proto.Message](
 	path string,
+	mode string,
 	scales *scalerCounts,
 	requestChannelLen int,
 	generate func() Request,
@@ -65,6 +67,7 @@ func newBaseGenerator[Request proto.Message](
 	}
 	return &baseGenerator[Request]{
 		scales:              scales,
+		mode:                mode,
 		currentFile:         file,
 		currentReader:       bufio.NewReader(file),
 		requestChannel:      make(chan requestWrapper[Request], requestChannelLen),
@@ -141,6 +144,10 @@ func (b *baseGenerator[Request]) generateData(owner generatorCallback) {
 		start = time.Now()
 		if owner != nil {
 			owner.afterInitDataRound(downstream)
+		}
+		if b.mode == "read" {
+			fmt.Println("read mode, just skip the data write in the normal round")
+			continue
 		}
 		b.generateDataFromFileStart(downstream)
 		for {
@@ -440,11 +447,13 @@ type measureDataGenerator struct {
 	serviceInstanceCache   map[string]map[string]bool
 	serviceEndpointCache   map[string]map[string]bool
 
+	mode string
+
 	hourGenerator *baseGenerator[*measurev1.WriteRequest]
 	dayGenerator  *baseGenerator[*measurev1.WriteRequest]
 }
 
-func newMeasureDataGenerator(dir string, scales *scalerCounts, requestChannelSize int, schemas map[string]*MeasureSchema) (*measureDataGenerator, error) {
+func newMeasureDataGenerator(dir string, mode string, scales *scalerCounts, requestChannelSize int, schemas map[string]*MeasureSchema) (*measureDataGenerator, error) {
 	var err error
 	measureGenerator := &measureDataGenerator{
 		trafficChannel:       make(chan *measurev1.WriteRequest, requestChannelSize),
@@ -453,6 +462,7 @@ func newMeasureDataGenerator(dir string, scales *scalerCounts, requestChannelSiz
 		trafficRequests:      make(map[EntityScopeType][]*measurev1.WriteRequest),
 		serviceInstanceCache: make(map[string]map[string]bool),
 		serviceEndpointCache: make(map[string]map[string]bool),
+		mode:                 mode,
 	}
 	go func() {
 		for {
@@ -463,7 +473,7 @@ func newMeasureDataGenerator(dir string, scales *scalerCounts, requestChannelSiz
 				measureGenerator.trafficCounterEndpoint)
 		}
 	}()
-	measureGenerator.hourGenerator, err = newBaseGenerator[*measurev1.WriteRequest](filepath.Join(dir, "hour"), scales, requestChannelSize, func() *measurev1.WriteRequest {
+	measureGenerator.hourGenerator, err = newBaseGenerator[*measurev1.WriteRequest](filepath.Join(dir, "hour"), mode, scales, requestChannelSize, func() *measurev1.WriteRequest {
 		return &measurev1.WriteRequest{}
 	}, func(request *measurev1.WriteRequest) schema[*measurev1.WriteRequest] {
 		return schemas[request.Metadata.Name]
@@ -477,7 +487,7 @@ func newMeasureDataGenerator(dir string, scales *scalerCounts, requestChannelSiz
 	if err != nil {
 		return nil, err
 	}
-	measureGenerator.dayGenerator, err = newBaseGenerator[*measurev1.WriteRequest](filepath.Join(dir, "day"), scales, requestChannelSize, func() *measurev1.WriteRequest {
+	measureGenerator.dayGenerator, err = newBaseGenerator[*measurev1.WriteRequest](filepath.Join(dir, "day"), mode, scales, requestChannelSize, func() *measurev1.WriteRequest {
 		return &measurev1.WriteRequest{}
 	}, func(request *measurev1.WriteRequest) schema[*measurev1.WriteRequest] {
 		return schemas[request.Metadata.Name]
@@ -492,7 +502,7 @@ func newMeasureDataGenerator(dir string, scales *scalerCounts, requestChannelSiz
 		return nil, err
 	}
 
-	measureGenerator.baseGenerator, err = newBaseGenerator[*measurev1.WriteRequest](filepath.Join(dir, "minute"), scales, requestChannelSize, func() *measurev1.WriteRequest {
+	measureGenerator.baseGenerator, err = newBaseGenerator[*measurev1.WriteRequest](filepath.Join(dir, "minute"), mode, scales, requestChannelSize, func() *measurev1.WriteRequest {
 		return &measurev1.WriteRequest{}
 	}, func(request *measurev1.WriteRequest) schema[*measurev1.WriteRequest] {
 		return schemas[request.Metadata.Name]
@@ -714,6 +724,9 @@ func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo
 	if b.normalWriteRoundStart != nil {
 		b.normalWriteRoundStart()
 	}
+	if b.mode == "read" {
+		return
+	}
 	// sending the traffic data again to make sure the traffic data is always exist
 	requests := b.trafficRequests[EntityScopeTypeServiceInstance]
 	for _, r := range requests {
@@ -730,7 +743,7 @@ func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo
 			if err != nil {
 				panic(err)
 			}
-			fmt.Println("generated instance traffic data for ", sn, string(sn), req.DataPoint.TagFamilies[1].Tags[1].Value.(*modelv1.TagValue_Str).Str.Value,
+			fmt.Println("generated instance traffic data for ", string(sn), req.DataPoint.TagFamilies[1].Tags[1].Value.(*modelv1.TagValue_Str).Str.Value,
 				":", string(marshal))
 			b.trafficChannel <- r
 		}
@@ -758,8 +771,8 @@ type streamDataGenerator struct {
 	schema map[string]*StreamSchema
 }
 
-func newStreamDataGenerator(path string, scaleCounts *scalerCounts, requestChannelSize int, schemas map[string]*StreamSchema, measureGenerator *measureDataGenerator) (*streamDataGenerator, error) {
-	generator, err := newBaseGenerator[*streamv1.WriteRequest](path, scaleCounts, requestChannelSize, func() *streamv1.WriteRequest {
+func newStreamDataGenerator(path, mode string, scaleCounts *scalerCounts, requestChannelSize int, schemas map[string]*StreamSchema, measureGenerator *measureDataGenerator) (*streamDataGenerator, error) {
+	generator, err := newBaseGenerator[*streamv1.WriteRequest](path, mode, scaleCounts, requestChannelSize, func() *streamv1.WriteRequest {
 		return &streamv1.WriteRequest{}
 	}, func(request *streamv1.WriteRequest) schema[*streamv1.WriteRequest] {
 		return schemas[request.Metadata.Name]
