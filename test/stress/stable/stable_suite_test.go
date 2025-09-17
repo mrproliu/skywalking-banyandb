@@ -225,25 +225,27 @@ func startBatch(
 	measureGenerator.start()
 	//streamGenerator.start()
 
-	go func() {
-		ticker := time.NewTicker(time.Second * 5)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				clientStats := ""
-				for i, s := range statics {
-					if i > 0 {
-						clientStats += ", "
+	if mode == "write" {
+		go func() {
+			ticker := time.NewTicker(time.Second * 5)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					clientStats := ""
+					for i, s := range statics {
+						if i > 0 {
+							clientStats += ", "
+						}
+						measureWrite, streamWrite := s.cleanAllCounter()
+						clientStats += fmt.Sprintf("client %d wrote %d measures, %d streams", s.index, measureWrite, streamWrite)
 					}
-					measureWrite, streamWrite := s.cleanAllCounter()
-					clientStats += fmt.Sprintf("client %d wrote %d measures, %d streams", s.index, measureWrite, streamWrite)
+					fmt.Println("Benchmark write statistics in the last 5 seconds: ", time.Now().Format(time.RFC3339), clientStats)
 				}
-				fmt.Println("Benchmark write statistics in the last 5 seconds: ", time.Now().Format(time.RFC3339), clientStats)
 			}
-		}
-	}()
+		}()
+	}
 
 	measureClientDone.Wait()
 	streamClientDone.Wait()
