@@ -52,6 +52,9 @@ func newMeasureQueryExecutor(parallels, times int, statsFile string, measureGene
 type executeContext struct {
 	latestServiceCount int
 	services           []*serviceNameCombine
+	clusters           [][]*serviceNameCombine
+	hasInstanceCheck   func(string) bool
+	hasEndpointCheck   func(string) bool
 }
 
 type serviceNameCombine struct {
@@ -69,6 +72,7 @@ type measureQueryExecuteJob struct {
 func (m *measureQueryExecutor) execute(c measurev1.MeasureServiceClient) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
+	var currentQuery measureQuery
 	invoke := func(v []*measurev1.QueryRequest, e []string) []*measurev1.QueryResponse {
 		result := make([]*measurev1.QueryResponse, len(v))
 		queue := make(chan *measureQueryExecuteJob, len(v))
@@ -91,7 +95,7 @@ func (m *measureQueryExecutor) execute(c measurev1.MeasureServiceClient) {
 
 					d := time.Now().Sub(t)
 					partDurations = append(partDurations, float64(d.Nanoseconds()))
-					m.stats.recordJob(j, resp, err)
+					m.stats.recordJob(currentQuery, j, resp, err)
 				}
 			}()
 		}
@@ -117,6 +121,7 @@ func (m *measureQueryExecutor) execute(c measurev1.MeasureServiceClient) {
 	for i := range m.eachTimes {
 		partNow := time.Now()
 		for _, q := range m.queries {
+			currentQuery = q
 			q.generate(ctx, start, end, invoke)
 		}
 		fmt.Printf("Queries executed(%d/%d), time cost: %s\n", i, m.eachTimes, time.Since(partNow).String())
@@ -132,27 +137,56 @@ func (m *measureQueryExecutor) generateContext() *executeContext {
 		ctx := &executeContext{
 			services:           make([]*serviceNameCombine, 0),
 			latestServiceCount: len(serviceTraffics),
+			clusters:           make([][]*serviceNameCombine, 0),
+			hasInstanceCheck: func(n string) bool {
+				_, exist := m.measureGenerator.serviceInstanceCache[n]
+				return exist
+			},
+			hasEndpointCheck: func(n string) bool {
+				_, exist := m.measureGenerator.serviceEndpointCache[n]
+				return exist
+			},
 		}
-		tmp := make(map[string]*serviceNameCombine)
+		namespaceServices := make(map[string]*serviceNameCombine)
+		clusters := make(map[string]map[string]*serviceNameCombine)
 		for _, t := range serviceTraffics {
 			name := parseServiceName(t.DataPoint.TagFamilies[0].Tags[0].Value.(*modelv1.TagValue_Str).Str.Value)
-			key := fmt.Sprintf("%s/%s", name.namespace, name.service)
-			combiner, ok := tmp[key]
-			if !ok {
-				combiner = &serviceNameCombine{
-					namespace: name.namespace,
-					service:   name.service,
+			namespaceServiceKey := fmt.Sprintf("%s/%s", name.namespace, name.service)
+			if name.cluster != serviceNameAny {
+				if _, exist := clusters[name.cluster]; !exist {
+					clusters[name.cluster] = make(map[string]*serviceNameCombine)
 				}
-				tmp[key] = combiner
+				m.getOrAddService(clusters[name.cluster], namespaceServiceKey, name)
 			}
-			combiner.names = append(combiner.names, name)
+			m.getOrAddService(namespaceServices, namespaceServiceKey, name)
 		}
-		for _, v := range tmp {
+		for _, v := range namespaceServices {
 			ctx.services = append(ctx.services, v)
+		}
+		inx := 0
+		ctx.clusters = make([][]*serviceNameCombine, len(clusters))
+		for _, v := range clusters {
+			ctx.clusters[inx] = make([]*serviceNameCombine, 0, len(v))
+			for _, sv := range v {
+				ctx.clusters[inx] = append(ctx.clusters[inx], sv)
+			}
+			inx++
 		}
 		m.ctx = ctx
 	}
 	return m.ctx
+}
+
+func (m *measureQueryExecutor) getOrAddService(maps map[string]*serviceNameCombine, key string, service *serviceName) {
+	combiner, ok := maps[key]
+	if !ok {
+		combiner = &serviceNameCombine{
+			namespace: service.namespace,
+			service:   service.service,
+		}
+		maps[key] = combiner
+	}
+	combiner.names = append(combiner.names, service)
 }
 
 func (m *executeContext) allService(filter func(name *serviceName) bool) []*serviceName {
@@ -215,6 +249,22 @@ func (m *executeContext) randomServiceWithGroup(count int, filter func(names *se
 	}
 	for s := range set {
 		result = append(result, s)
+	}
+	return result
+}
+
+func (m *executeContext) randomClusters(count int) [][]*serviceNameCombine {
+	result := make([][]*serviceNameCombine, 0, count)
+	set := make(map[int]bool)
+	for {
+		randInx := rand2.Int() % len(m.clusters)
+		set[randInx] = true
+		if len(set) >= count {
+			break
+		}
+	}
+	for k := range set {
+		result = append(result, m.clusters[k])
 	}
 	return result
 }
@@ -284,7 +334,7 @@ func newDashboardServiceQuery(path string) measureQuery {
 
 func (d *dashboardServicesQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
 	services := ctx.randomService(20, func(name *serviceName) bool {
-		return name.highLevelService || name.hostnameService || name.unknownService || name.namespace == "eshop" || name.aggrService
+		return name.highLevelService || name.hostnameService || name.unknownService || !strings.HasPrefix(name.namespace, "dev-") || name.aggrService || !ctx.hasInstanceCheck(name.original)
 	})
 	// instance query
 	invoke(queryGenerate(nil, timestamppb.New(end.Truncate(time.Minute)), d.instance, services, func(q *measurev1.QueryRequest, data *serviceName) string {
@@ -447,7 +497,7 @@ func (o *orgServiceMetricsQuery) generate(ctx *executeContext, start, end time.T
 	// query service
 	services := ctx.randomService(1, func(name *serviceName) bool {
 		return name.highLevelService || name.hostnameService || name.unknownService || name.namespace == "eshop" ||
-			name.aggrService
+			name.aggrService || !ctx.hasInstanceCheck(name.original)
 	})
 
 	serviceIdList := make([]*serviceName, 0, 2)
@@ -559,6 +609,215 @@ func (w *workspacePerformanceQuery) generate(ctx *executeContext, start, end tim
 	}))
 }
 
+type dashboardTopologyQuery struct {
+	serviceTraffic  []*measurev1.QueryRequest
+	topologyNormal  []*measurev1.QueryRequest
+	topologyReplace []*measurev1.QueryRequest
+	services        []*measurev1.QueryRequest
+	serviceCalls    []*measurev1.QueryRequest
+}
+
+func newDashboardTopologyQuery(path string) measureQuery {
+	data := readYamlAsMap(path)
+	return &dashboardTopologyQuery{
+		serviceTraffic:  queryUnwrapFromAccessLog(data["serviceTraffic"]),
+		topologyNormal:  queryUnwrapFromAccessLog(data["topologyNormal"]),
+		topologyReplace: queryUnwrapFromAccessLog(data["topologyReplace"]),
+		services:        queryUnwrapFromAccessLog(data["services"]),
+		serviceCalls:    queryUnwrapFromAccessLog(data["serviceCalls"]),
+	}
+}
+
+func (d *dashboardTopologyQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
+	// random select two cluster
+	clusters := ctx.randomClusters(2)
+	allServiceIDs := make([]string, 0)
+	allServiceWithoutGatewayIDs := make([]string, 0)
+	for _, cs := range clusters {
+		for _, s := range cs {
+			for _, n := range s.names {
+				if n.aggrService || n.unknownService || n.hostnameService || n.highLevelService {
+					continue
+				}
+				allServiceIDs = append(allServiceIDs, n.serviceID())
+				if !strings.Contains(n.service, "gateway") {
+					allServiceWithoutGatewayIDs = append(allServiceWithoutGatewayIDs, n.serviceID())
+				}
+			}
+		}
+	}
+
+	invoke(queryGenerate(nil, nil, d.serviceTraffic, []string{""}, func(q *measurev1.QueryRequest, data string) string {
+		return ""
+	}))
+
+	// normal topology query
+	topologyResp := invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.topologyNormal, []string{""}, func(q *measurev1.QueryRequest, data string) string {
+		le := queryCriteriaLe(q.Criteria)
+		queryCriteriaCondition(le.Left).Value = queryCriterialStringArray(allServiceWithoutGatewayIDs)
+		le = queryCriteriaLe(le.Right)
+		queryCriteriaCondition(le.Left).Value = queryCriterialStringArray(allServiceWithoutGatewayIDs)
+		return ""
+	}))
+
+	// replacement topology query
+	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.topologyReplace, []string{""}, func(q *measurev1.QueryRequest, data string) string {
+		le := queryCriteriaLe(q.Criteria)
+		queryCriteriaCondition(le.Left).Value = queryCriterialStringArray(allServiceIDs)
+		le = queryCriteriaLe(le.Right)
+		queryCriteriaCondition(le.Left).Value = queryCriterialStringArray(allServiceIDs)
+		return ""
+	}))
+
+	serviceIDs, serviceCallIDs := d.getAllServiceAndRelations(topologyResp)
+
+	// services query
+	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.services, serviceIDs, func(q *measurev1.QueryRequest, data string) string {
+		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data)
+		return data
+	}))
+
+	// service calls query
+	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.serviceCalls, serviceCallIDs, func(q *measurev1.QueryRequest, data string) string {
+		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data)
+		return data
+	}))
+}
+
+func (d *dashboardTopologyQuery) getAllServiceAndRelations(topologies []*measurev1.QueryResponse) ([]string, []string) {
+	serviceSet := make(map[string]bool)
+	relationsSet := make(map[string]bool)
+	for _, topology := range topologies {
+		for _, point := range topology.DataPoints {
+			if len(point.TagFamilies) >= 1 && len(point.TagFamilies[0].Tags) == 2 {
+				relationEntity := point.TagFamilies[0].Tags[1].Value.Value.(*modelv1.TagValue_Str).Str.Value
+				parts := strings.Split(relationEntity, "-")
+				if len(parts) == 2 {
+					sourceService := parts[0]
+					destService := parts[1]
+					serviceSet[sourceService] = true
+					serviceSet[destService] = true
+					relationsSet[relationEntity] = true
+				}
+			}
+		}
+	}
+	services := make([]string, 0, len(serviceSet))
+	for s := range serviceSet {
+		services = append(services, s)
+	}
+	relations := make([]string, 0, len(relationsSet))
+	for r := range relationsSet {
+		relations = append(relations, r)
+	}
+	return services, relations
+}
+
+type dashboardTopologyServiceQuery struct {
+	services        []*measurev1.QueryRequest
+	instances       []*measurev1.QueryRequest
+	instanceMetrics []*measurev1.QueryRequest
+}
+
+func newDashboardTopologyServiceQuery(path string) measureQuery {
+	data := readYamlAsMap(path)
+	return &dashboardTopologyServiceQuery{
+		services:        queryUnwrapFromAccessLog(data["services"]),
+		instances:       queryUnwrapFromAccessLog(data["instances"]),
+		instanceMetrics: queryUnwrapFromAccessLog(data["instanceMetrics"]),
+	}
+}
+
+func (d *dashboardTopologyServiceQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
+	service := ctx.randomService(1, func(name *serviceName) bool {
+		return name.highLevelService || name.hostnameService || name.unknownService || name.aggrService || !ctx.hasInstanceCheck(name.original)
+	})
+
+	// services query
+	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.services, service, func(q *measurev1.QueryRequest, data *serviceName) string {
+		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
+		return data.original
+	}))
+
+	// instance list
+	responses := invoke(queryGenerate(nil, timestamppb.New(end.Truncate(time.Minute)), d.instances, service, func(q *measurev1.QueryRequest, data *serviceName) string {
+		le := queryCriteriaLe(q.Criteria)
+		queryCriteriaCondition(le.Left).Value = queryCriterialMinuteTimeBucketValue(start)
+		queryCriteriaCondition(queryCriteriaLe(le.Right).Left).Value = queryCriterialStringValue(data.serviceID())
+		return data.original
+	}))
+
+	// query instance metrics
+	instanceIds := make([]*instanceInfo, 0)
+	for _, dp := range responses[0].DataPoints {
+		for _, tf := range dp.TagFamilies {
+			if tf.Name == "storage-only" {
+				for _, tag := range tf.Tags {
+					if tag.Key == "instance_traffic_name" {
+						instanceName := tag.Value.Value.(*modelv1.TagValue_Str).Str.Value
+						instanceID := service[0].serviceID() + "_" + base64.StdEncoding.EncodeToString([]byte(instanceName))
+						instanceIds = append(instanceIds, &instanceInfo{
+							service:  service[0],
+							instance: instanceName,
+							id:       instanceID,
+						})
+						break
+					}
+				}
+			}
+		}
+	}
+	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.instanceMetrics, instanceIds, func(q *measurev1.QueryRequest, data *instanceInfo) string {
+		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.id)
+		return fmt.Sprintf("%s/%s", data.service.original, data.instance)
+	}))
+}
+
+type dashboardTopologyEndpointQuery struct {
+	endpoints       []*measurev1.QueryRequest
+	endpointMetrics []*measurev1.QueryRequest
+}
+
+func newDashboardTopologyEndpointQuery(path string) measureQuery {
+	data := readYamlAsMap(path)
+	return &dashboardTopologyEndpointQuery{
+		endpoints:       queryUnwrapFromAccessLog(data["endpoints"]),
+		endpointMetrics: queryUnwrapFromAccessLog(data["endpointMetrics"]),
+	}
+}
+
+func (d *dashboardTopologyEndpointQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
+	services := ctx.randomService(1, func(name *serviceName) bool {
+		return name.highLevelService || name.hostnameService || name.unknownService || name.aggrService || !ctx.hasEndpointCheck(name.original)
+	})
+
+	// query endpoint list
+	endpoints := invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.endpoints, services, func(q *measurev1.QueryRequest, data *serviceName) string {
+		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
+		return data.original
+	}))
+
+	// query endpoint metrics
+	endpointIDs := make([]string, 0, len(endpoints[0].DataPoints))
+	for _, dp := range endpoints[0].DataPoints {
+		for _, tf := range dp.TagFamilies {
+			if tf.Name == "storage-only" {
+				for _, tag := range tf.Tags {
+					if tag.Key == "entity_id" {
+						endpointID := tag.Value.Value.(*modelv1.TagValue_Str).Str.Value
+						endpointIDs = append(endpointIDs, endpointID)
+						break
+					}
+				}
+			}
+		}
+	}
+	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.endpointMetrics, endpointIDs, func(q *measurev1.QueryRequest, data string) string {
+		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data)
+		return data
+	}))
+}
+
 func readYamlAsMap(path string) map[string]string {
 	file, err := os.ReadFile(path)
 	if err != nil {
@@ -617,6 +876,16 @@ func queryCriterialMinuteTimeBucketValue(tb time.Time) *modelv1.TagValue {
 	return queryCriterialIntValue(i)
 }
 
+func queryCriterialStringArray(vals []string) *modelv1.TagValue {
+	return &modelv1.TagValue{
+		Value: &modelv1.TagValue_StrArray{
+			StrArray: &modelv1.StrArray{
+				Value: vals,
+			},
+		},
+	}
+}
+
 type queryStats struct {
 	path string
 	f    *os.File
@@ -627,7 +896,7 @@ type queryStats struct {
 
 	totalDurations []float64
 	errorStats     map[string]*int64
-	emptyRespStats map[string]map[string]*int64
+	emptyRespStats map[string]map[string]map[string]*int64
 	totalCounts    map[string]*int64
 
 	lock sync.Mutex
@@ -657,7 +926,7 @@ func (q *queryStats) newQueryRound() {
 
 	q.totalDurations = make([]float64, 0)
 	q.errorStats = make(map[string]*int64)
-	q.emptyRespStats = make(map[string]map[string]*int64)
+	q.emptyRespStats = make(map[string]map[string]map[string]*int64)
 	q.totalCounts = make(map[string]*int64)
 }
 
@@ -667,7 +936,7 @@ func (q *queryStats) recordPartLatencies(v []float64) {
 	q.totalDurations = append(q.totalDurations, v...)
 }
 
-func (q *queryStats) recordJob(j *measureQueryExecuteJob, response *measurev1.QueryResponse, err error) {
+func (q *queryStats) recordJob(query measureQuery, j *measureQueryExecuteJob, response *measurev1.QueryResponse, err error) {
 	atomic.AddInt64(q.totalCount, 1)
 	q.lock.Lock()
 	defer q.lock.Unlock()
@@ -681,10 +950,16 @@ func (q *queryStats) recordJob(j *measureQueryExecuteJob, response *measurev1.Qu
 		atomic.AddInt64(d, 1)
 	} else if len(response.DataPoints) == 0 {
 		atomic.AddInt64(q.emptyReqCount, 1)
-		d, exist := q.emptyRespStats[j.req.Name]
+		queryName := fmt.Sprintf("%T", query)
+		empties, exist := q.emptyRespStats[queryName]
+		if !exist {
+			empties = make(map[string]map[string]*int64)
+			q.emptyRespStats[queryName] = empties
+		}
+		d, exist := empties[j.req.Name]
 		if !exist {
 			d = make(map[string]*int64)
-			q.emptyRespStats[j.req.Name] = d
+			empties[j.req.Name] = d
 		}
 		v, exist := d[j.entity]
 		if !exist {
@@ -723,20 +998,22 @@ func (q *queryStats) writeQueryResult() {
 			details += "\n"
 		}
 		details += fmt.Sprintf("Empties: ")
-		for e, i := range q.emptyRespStats {
-			var counts int64
-			if totalCounts, exist := q.totalCounts[e]; exist {
-				counts = atomic.LoadInt64(totalCounts)
+		for query, empties := range q.emptyRespStats {
+			for e, i := range empties {
+				var counts int64
+				if totalCounts, exist := q.totalCounts[e]; exist {
+					counts = atomic.LoadInt64(totalCounts)
+				}
+				tmp := ""
+				missingCount := int64(0)
+				for entity, c := range i {
+					val := atomic.LoadInt64(c)
+					tmp += fmt.Sprintf("\n\t\t%s: %d", entity, val)
+					missingCount += val
+				}
+				details += fmt.Sprintf("\n\t%s:%s: total: %d, empty: %d", query, e, counts, missingCount)
+				details += tmp
 			}
-			tmp := ""
-			missingCount := int64(0)
-			for entity, c := range i {
-				val := atomic.LoadInt64(c)
-				tmp += fmt.Sprintf("\n\t\t%s: %d", entity, val)
-				missingCount += val
-			}
-			details += fmt.Sprintf("\n\t%s: total: %d, empty: %d", e, counts, missingCount)
-			details += tmp
 		}
 	}
 	if len(details) > 0 {
