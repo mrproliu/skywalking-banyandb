@@ -61,6 +61,7 @@ var (
 	queryParallelsCount        = envInt("BANYANDB_TEST_QUERY_PARALLELS_COUNT", 20) // total number of parallels for query execution
 	queryTimes                 = envInt("BANYANDB_TEST_QUERY_TIMES", 50)           // each query will execute how many times
 	queryStatsFilePath         = envString("BANYANDB_TEST_QUERY_STATS_FILE_PATH", filepath.Join(os.TempDir(), "query-stats.txt"))
+	mode                       = envString("BANYANDB_TEST_MODE", "write")
 
 	k8sClient              *kubernetes.Clientset
 	k8sRestConfig          *rest.Config
@@ -144,7 +145,7 @@ var _ = g.Describe("Stable", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Starting the data generators
-		measureGenerator, err := newMeasureDataGenerator(measureAccessLogPath, &scalerCounts{
+		measureGenerator, err := newMeasureDataGenerator(measureAccessLogPath, mode, &scalerCounts{
 			cluster:  scaleClusterCount,
 			service:  scaleServiceCount,
 			instance: scaleInstanceCount,
@@ -152,28 +153,34 @@ var _ = g.Describe("Stable", func() {
 		}, measureBulkSize*clientCount*5, measureSchemas)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		//queryExecutor := newMeasureQueryExecutor(queryParallelsCount, queryTimes, queryStatsFilePath, measureGenerator,
-		//	newDashboardServiceQuery(filepath.Join(queryDir, "measure", "dashboardServices.yaml")),
-		//	newDashboardGatewayServiceQuery(filepath.Join(queryDir, "measure", "dashboardGatewayServices.yaml")),
-		//	newOrgServiceQuery(filepath.Join(queryDir, "measure", "orgServices.yaml")),
-		//	newOrgServiceDetailQuery(filepath.Join(queryDir, "measure", "orgServiceDetail.yaml")),
-		//	newOrgServiceMetricsQuery(filepath.Join(queryDir, "measure", "orgServiceMetrics.yaml")),
-		//	newWorkspacePerformanceQuery(filepath.Join(queryDir, "measure", "workspacePerformance.yaml")),
-		//)
-		//measureGenerator.setNormalWriteRoundStart(func() {
-		//	go queryExecutor.execute(measurev1.NewMeasureServiceClient(connections[0]))
-		//})
+		queryExecutor := newMeasureQueryExecutor(queryParallelsCount, queryTimes, queryStatsFilePath, measureGenerator,
+			newDashboardServiceQuery(filepath.Join(queryDir, "measure", "dashboardServices.yaml")),
+			newDashboardTopologyQuery(filepath.Join(queryDir, "measure", "dashboardTopology.yaml")),
+			newDashboardTopologyServiceQuery(filepath.Join(queryDir, "measure", "dashboardTopologyServices.yaml")),
+			newDashboardTopologyEndpointQuery(filepath.Join(queryDir, "measure", "dashboardTopologyEndpoints.yaml")),
+			newDashboardGatewayServiceQuery(filepath.Join(queryDir, "measure", "dashboardGatewayServices.yaml")),
+			newOrgServiceQuery(filepath.Join(queryDir, "measure", "orgServices.yaml")),
+			newOrgServiceDetailQuery(filepath.Join(queryDir, "measure", "orgServiceDetail.yaml")),
+			newOrgServiceMetricsQuery(filepath.Join(queryDir, "measure", "orgServiceMetrics.yaml")),
+			newWorkspacePerformanceQuery(filepath.Join(queryDir, "measure", "workspacePerformance.yaml")),
+		)
+		if mode == "read" {
+			measureGenerator.setNormalWriteRoundStart(func() {
+				// only execute the query when mode is read
+				go queryExecutor.execute(measurev1.NewMeasureServiceClient(connections[0]))
+			})
+		}
 
 		////streamGenerator, err := newStreamDataGenerator(streamAccessLogPath, scaleServiceCount,
 		////	measureBulkSize*clientCount*5, streamSchemas, measureGenerator)
 		////gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		//
 		// starting the batch write
-		startBatchWrite(connections, measureGenerator, nil, totalBenchmarkTime)
+		startBatch(connections, measureGenerator, nil, totalBenchmarkTime)
 	})
 })
 
-func startBatchWrite(
+func startBatch(
 	connections []*grpc.ClientConn,
 	measureGenerator *measureDataGenerator,
 	streamGenerator *streamDataGenerator,
