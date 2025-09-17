@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -271,15 +272,23 @@ type downstreamTimeInfo struct {
 	day    time.Time
 
 	now time.Time
+
+	minuteTimeBucket int64
 }
 
 func newCurrentMinuteDownstream() *downstreamTimeInfo {
 	now := time.Now()
+	minuteTimeBucket := now.Format("200601021504")
+	timeBucketVal, err := strconv.ParseInt(minuteTimeBucket, 10, 64)
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse time bucket: %v", minuteTimeBucket))
+	}
 	return &downstreamTimeInfo{
-		minute: now.Truncate(time.Minute),
-		hour:   now.Truncate(time.Hour),
-		day:    now.Truncate(24 * time.Hour),
-		now:    now,
+		minute:           now.Truncate(time.Minute),
+		hour:             now.Truncate(time.Hour),
+		day:              now.Truncate(24 * time.Hour),
+		now:              now,
+		minuteTimeBucket: timeBucketVal,
 	}
 }
 
@@ -428,6 +437,8 @@ type measureDataGenerator struct {
 	trafficCounterEndpoint int64
 	trafficRegisterLock    sync.RWMutex
 	normalWriteRoundStart  func()
+	serviceInstanceCache   map[string]map[string]bool
+	serviceEndpointCache   map[string]map[string]bool
 
 	hourGenerator *baseGenerator[*measurev1.WriteRequest]
 	dayGenerator  *baseGenerator[*measurev1.WriteRequest]
@@ -436,10 +447,12 @@ type measureDataGenerator struct {
 func newMeasureDataGenerator(dir string, scales *scalerCounts, requestChannelSize int, schemas map[string]*MeasureSchema) (*measureDataGenerator, error) {
 	var err error
 	measureGenerator := &measureDataGenerator{
-		trafficChannel:  make(chan *measurev1.WriteRequest, requestChannelSize),
-		schemas:         schemas,
-		trafficRegister: make(map[string]bool),
-		trafficRequests: make(map[EntityScopeType][]*measurev1.WriteRequest),
+		trafficChannel:       make(chan *measurev1.WriteRequest, requestChannelSize),
+		schemas:              schemas,
+		trafficRegister:      make(map[string]bool),
+		trafficRequests:      make(map[EntityScopeType][]*measurev1.WriteRequest),
+		serviceInstanceCache: make(map[string]map[string]bool),
+		serviceEndpointCache: make(map[string]map[string]bool),
 	}
 	go func() {
 		for {
@@ -540,7 +553,7 @@ func (b *measureDataGenerator) adjustTimeFromTime(t time.Time, info *downstreamT
 	}
 }
 
-func (b *measureDataGenerator) registerTraffic(trafficName string, counter *int64, tp EntityScopeType, generator func() *measurev1.WriteRequest) {
+func (b *measureDataGenerator) registerTraffic(trafficName string, counter *int64, tp EntityScopeType, generator func() *measurev1.WriteRequest, addedCallback func()) {
 	b.trafficRegisterLock.RLock()
 	_, exist := b.trafficRegister[trafficName]
 	b.trafficRegisterLock.RUnlock()
@@ -563,6 +576,9 @@ func (b *measureDataGenerator) registerTraffic(trafficName string, counter *int6
 			b.trafficRequests[tp] = make([]*measurev1.WriteRequest, 0)
 		}
 		b.trafficRequests[tp] = append(b.trafficRequests[tp], traffic)
+		if addedCallback != nil {
+			addedCallback()
+		}
 	default:
 		// delete the traffic register if the channel is full
 		delete(b.trafficRegister, trafficName)
@@ -600,6 +616,13 @@ func (b *measureDataGenerator) registerServiceEndpointTraffic(serviceName, endpo
 			},
 			MessageId: uint64(now.UnixNano()),
 		}
+	}, func() {
+		endpoints, exist := b.serviceEndpointCache[serviceName]
+		if !exist {
+			endpoints = make(map[string]bool)
+			b.serviceEndpointCache[serviceName] = endpoints
+		}
+		endpoints[endpointName] = true
 	})
 }
 
@@ -635,6 +658,13 @@ func (b *measureDataGenerator) registerServiceInstanceTraffic(serviceName, insta
 			},
 			MessageId: uint64(now.UnixNano()),
 		}
+	}, func() {
+		instances, exist := b.serviceInstanceCache[serviceName]
+		if !exist {
+			instances = make(map[string]bool)
+			b.serviceInstanceCache[serviceName] = instances
+		}
+		instances[instanceName] = true
 	})
 }
 
@@ -667,7 +697,7 @@ func (b *measureDataGenerator) registerServiceTraffic(serviceName string) {
 			},
 			MessageId: uint64(now.UnixNano()),
 		}
-	})
+	}, nil)
 }
 
 func (b *measureDataGenerator) changeMeasureBasicTimestamp(req *measurev1.WriteRequest, t time.Time) {
@@ -690,6 +720,18 @@ func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo
 		for _ = range 2 {
 			req := proto.Clone(r).(*measurev1.WriteRequest)
 			b.changeMeasureBasicTimestamp(req, downstream.now)
+			req.DataPoint.TagFamilies[0].Tags[0].Value = &modelv1.TagValue_Int{Int: &modelv1.Int{Value: downstream.minuteTimeBucket}}
+			serviceIDTag := req.DataPoint.TagFamilies[1].Tags[0].Value
+			sn, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(serviceIDTag.(*modelv1.TagValue_Str).Str.Value, ".1"))
+			if err != nil {
+				panic(err)
+			}
+			marshal, err := protojson.Marshal(req)
+			if err != nil {
+				panic(err)
+			}
+			fmt.Println("generated instance traffic data for ", sn, string(sn), req.DataPoint.TagFamilies[1].Tags[1].Value.(*modelv1.TagValue_Str).Str.Value,
+				":", string(marshal))
 			b.trafficChannel <- r
 		}
 	}
@@ -698,6 +740,7 @@ func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo
 		for _ = range 2 {
 			req := proto.Clone(r).(*measurev1.WriteRequest)
 			b.changeMeasureBasicTimestamp(req, downstream.now)
+			req.DataPoint.TagFamilies[0].Tags[1].Value = &modelv1.TagValue_Int{Int: &modelv1.Int{Value: downstream.minuteTimeBucket}}
 			b.trafficChannel <- r
 		}
 	}
