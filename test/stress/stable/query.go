@@ -801,6 +801,10 @@ func (d *dashboardTopologyEndpointQuery) generate(ctx *executeContext, start, en
 	}))
 
 	// query endpoint metrics
+	if len(endpoints) == 0 || len(endpoints[0].DataPoints) == 0 {
+		fmt.Println("No endpoint found, skip endpoint metrics query:", services[0].original)
+		return
+	}
 	endpointIDs := make([]string, 0, len(endpoints[0].DataPoints))
 	for _, dp := range endpoints[0].DataPoints {
 		for _, tf := range dp.TagFamilies {
