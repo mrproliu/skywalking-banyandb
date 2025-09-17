@@ -305,6 +305,12 @@ func (d *downstreamTimeInfo) increaseOneMinute() {
 	d.minute = d.now.Truncate(time.Minute)
 	d.hour = d.now.Truncate(time.Hour)
 	d.day = d.now.Truncate(24 * time.Hour)
+	format := d.now.Format("200601021504")
+	timeBucketVal, err := strconv.ParseInt(format, 10, 64)
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse time bucket: %v", format))
+	}
+	d.minuteTimeBucket = timeBucketVal
 }
 
 type scalerCounts struct {
