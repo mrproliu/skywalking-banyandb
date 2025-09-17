@@ -120,11 +120,18 @@ func (m *measureQueryExecutor) execute(c measurev1.MeasureServiceClient) {
 	now := time.Now()
 	for i := range m.eachTimes {
 		partNow := time.Now()
+		queryTimeStr := ""
 		for _, q := range m.queries {
 			currentQuery = q
+			queryNow := time.Now()
 			q.generate(ctx, start, end, invoke)
+			if queryTimeStr != "" {
+				queryTimeStr += ", "
+			}
+			queryTimeStr += fmt.Sprintf("%s: %s", fmt.Sprintf("%T", q), time.Since(queryNow).String())
 		}
-		fmt.Printf("Queries executed(%d/%d), time cost: %s\n", i, m.eachTimes, time.Since(partNow).String())
+		fmt.Printf("Queries executed(%d/%d), time cost: %s, each query: %s\n", i, m.eachTimes, time.Since(partNow).String(),
+			queryTimeStr)
 	}
 
 	fmt.Printf("Total queries executed, time cost: %s\n", time.Since(now).String())
@@ -205,7 +212,7 @@ func (m *executeContext) allService(filter func(name *serviceName) bool) []*serv
 func (m *executeContext) randomService(count int, filter func(name *serviceName) bool) []*serviceName {
 	result := make([]*serviceName, 0, count)
 	set := make(map[*serviceName]bool)
-	for tmp := 0; tmp < count*10; tmp++ {
+	for tmp := 0; tmp < count*1000; tmp++ {
 		randInx := rand2.Int() % len(m.services)
 		s := m.services[randInx]
 		var latestNotFiltered *serviceName
