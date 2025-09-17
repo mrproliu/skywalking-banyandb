@@ -73,10 +73,12 @@ func (m *measureQueryExecutor) execute(c measurev1.MeasureServiceClient) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	var currentQuery measureQuery
-	invoke := func(v []*measurev1.QueryRequest, e []string) []*measurev1.QueryResponse {
+	nameWithTime := make(map[string]time.Duration)
+	invoke := func(name string, v []*measurev1.QueryRequest, e []string) []*measurev1.QueryResponse {
 		result := make([]*measurev1.QueryResponse, len(v))
 		queue := make(chan *measureQueryExecuteJob, len(v))
 		wg := sync.WaitGroup{}
+		now := time.Now()
 		for i := 0; i < m.parallels; i++ {
 			wg.Add(1)
 			go func() {
@@ -106,6 +108,8 @@ func (m *measureQueryExecutor) execute(c measurev1.MeasureServiceClient) {
 
 		close(queue)
 		wg.Wait()
+		duration := time.Now().Sub(now)
+		nameWithTime[name] += duration
 		return result
 	}
 
@@ -123,12 +127,10 @@ func (m *measureQueryExecutor) execute(c measurev1.MeasureServiceClient) {
 		queryTimeStr := ""
 		for _, q := range m.queries {
 			currentQuery = q
+			nameWithTime = make(map[string]time.Duration)
 			queryNow := time.Now()
 			q.generate(ctx, start, end, invoke)
-			if queryTimeStr != "" {
-				queryTimeStr += ", "
-			}
-			queryTimeStr += fmt.Sprintf("%s: %s", fmt.Sprintf("%T", q), time.Since(queryNow).String())
+			queryTimeStr += fmt.Sprintf("\n\t%s: %s(%s)", fmt.Sprintf("%T", q), time.Since(queryNow).String(), nameWithTime)
 		}
 		fmt.Printf("Queries executed(%d/%d), time cost: %s, each query: %s\n", i, m.eachTimes, time.Since(partNow).String(),
 			queryTimeStr)
@@ -277,7 +279,7 @@ func (m *executeContext) randomClusters(count int) [][]*serviceNameCombine {
 }
 
 type measureQuery interface {
-	generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse)
+	generate(ctx *executeContext, start, end time.Time, invoke func(string, []*measurev1.QueryRequest, []string) []*measurev1.QueryResponse)
 }
 
 func queryUnwrapFromAccessLog(d string) []*measurev1.QueryRequest {
@@ -304,7 +306,7 @@ func queryUnwrapFromAccessLog(d string) []*measurev1.QueryRequest {
 	return result
 }
 
-func queryGenerate[M any](start, end *timestamppb.Timestamp, original []*measurev1.QueryRequest, data []M, setting func(q *measurev1.QueryRequest, data M) string) ([]*measurev1.QueryRequest, []string) {
+func queryGenerate[M any](name string, start, end *timestamppb.Timestamp, original []*measurev1.QueryRequest, data []M, setting func(q *measurev1.QueryRequest, data M) string) (string, []*measurev1.QueryRequest, []string) {
 	requests := make([]*measurev1.QueryRequest, 0, len(original)*len(data))
 	entities := make([]string, 0, len(original)*len(data))
 	for _, r := range original {
@@ -321,7 +323,7 @@ func queryGenerate[M any](start, end *timestamppb.Timestamp, original []*measure
 			entities = append(entities, entity)
 		}
 	}
-	return requests, entities
+	return name, requests, entities
 }
 
 type dashboardServicesQuery struct {
@@ -339,24 +341,24 @@ func newDashboardServiceQuery(path string) measureQuery {
 	}
 }
 
-func (d *dashboardServicesQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
+func (d *dashboardServicesQuery) generate(ctx *executeContext, start, end time.Time, invoke func(string, []*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
 	services := ctx.randomService(20, func(name *serviceName) bool {
 		return name.highLevelService || name.hostnameService || name.unknownService || !strings.HasPrefix(name.namespace, "dev-") || name.aggrService || !ctx.hasInstanceCheck(name.original)
 	})
 	// instance query
-	invoke(queryGenerate(nil, timestamppb.New(end.Truncate(time.Minute)), d.instance, services, func(q *measurev1.QueryRequest, data *serviceName) string {
+	invoke(queryGenerate("instances", nil, timestamppb.New(end.Truncate(time.Minute)), d.instance, services, func(q *measurev1.QueryRequest, data *serviceName) string {
 		le := queryCriteriaLe(q.Criteria)
 		queryCriteriaCondition(le.Left).Value = queryCriterialMinuteTimeBucketValue(start)
 		queryCriteriaCondition(queryCriteriaLe(le.Right).Left).Value = queryCriterialStringValue(data.serviceID())
 		return data.original
 	}))
 	// service query
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.services, services, func(q *measurev1.QueryRequest, data *serviceName) string {
+	invoke(queryGenerate("services", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.services, services, func(q *measurev1.QueryRequest, data *serviceName) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
 		return data.original
 	}))
 	// tags query
-	invoke(queryGenerate(timestamppb.New(start.Truncate(24*time.Hour)), timestamppb.New(end.Truncate(24*time.Hour)),
+	invoke(queryGenerate("tags", timestamppb.New(start.Truncate(24*time.Hour)), timestamppb.New(end.Truncate(24*time.Hour)),
 		d.tags, []string{""}, func(q *measurev1.QueryRequest, data string) string {
 			return ""
 		}))
@@ -373,13 +375,13 @@ func newDashboardGatewayServiceQuery(path string) measureQuery {
 	}
 }
 
-func (d *dashboardGatewayServicesQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
+func (d *dashboardGatewayServicesQuery) generate(ctx *executeContext, start, end time.Time, invoke func(string, []*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
 	services := ctx.randomService(20, func(name *serviceName) bool {
 		return !name.hostnameService || name.aggrService
 	})
 
 	// service query
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.services, services, func(q *measurev1.QueryRequest, data *serviceName) string {
+	invoke(queryGenerate("services", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.services, services, func(q *measurev1.QueryRequest, data *serviceName) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
 		return data.original
 	}))
@@ -398,13 +400,13 @@ func newOrgServiceQuery(path string) measureQuery {
 	}
 }
 
-func (o *orgServicesQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
+func (o *orgServicesQuery) generate(ctx *executeContext, start, end time.Time, invoke func(string, []*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
 	services := ctx.randomService(20, func(name *serviceName) bool {
 		return name.highLevelService || name.hostnameService || name.unknownService || name.namespace == "eshop" ||
 			name.subset == serviceNameAny || name.cluster == serviceNameAny || name.aggrService
 	})
 
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.services, services, func(q *measurev1.QueryRequest, data *serviceName) string {
+	invoke(queryGenerate("services-normal", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.services, services, func(q *measurev1.QueryRequest, data *serviceName) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
 		return data.original
 	}))
@@ -414,7 +416,7 @@ func (o *orgServicesQuery) generate(ctx *executeContext, start, end time.Time, i
 	for _, s := range services {
 		highLevelServices = append(highLevelServices, s.toService(serviceNameAny, serviceNameAny, s.service, serviceNameAny))
 	}
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.services, highLevelServices, func(q *measurev1.QueryRequest, data *serviceName) string {
+	invoke(queryGenerate("service-high-level", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.services, highLevelServices, func(q *measurev1.QueryRequest, data *serviceName) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
 		return data.original
 	}))
@@ -433,7 +435,7 @@ func newOrgServiceDetailQuery(path string) measureQuery {
 	}
 }
 
-func (o *orgServiceDetailQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
+func (o *orgServiceDetailQuery) generate(ctx *executeContext, start, end time.Time, invoke func(string, []*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
 	// service must not contain host name
 	services := ctx.randomServiceWithGroup(1, func(names *serviceNameCombine) bool {
 		var highLevelCount int
@@ -469,11 +471,11 @@ func (o *orgServiceDetailQuery) generate(ctx *executeContext, start, end time.Ti
 		}
 	}
 
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.nsWithNameServices, []*serviceName{nsWithNameService}, func(q *measurev1.QueryRequest, data *serviceName) string {
+	invoke(queryGenerate("services-ns-name", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.nsWithNameServices, []*serviceName{nsWithNameService}, func(q *measurev1.QueryRequest, data *serviceName) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
 		return data.original
 	}))
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.otherServices, otherServices, func(q *measurev1.QueryRequest, data *serviceName) string {
+	invoke(queryGenerate("services-others", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.otherServices, otherServices, func(q *measurev1.QueryRequest, data *serviceName) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
 		return data.original
 	}))
@@ -500,7 +502,7 @@ type instanceInfo struct {
 	id       string
 }
 
-func (o *orgServiceMetricsQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
+func (o *orgServiceMetricsQuery) generate(ctx *executeContext, start, end time.Time, invoke func(string, []*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
 	// query service
 	services := ctx.randomService(1, func(name *serviceName) bool {
 		return name.highLevelService || name.hostnameService || name.unknownService || name.namespace == "eshop" ||
@@ -511,13 +513,13 @@ func (o *orgServiceMetricsQuery) generate(ctx *executeContext, start, end time.T
 	serviceIdList = append(serviceIdList, services[0])
 	serviceIdList = append(serviceIdList, services[0].toService(services[0].subset, serviceNameAny, services[0].service, serviceNameAny))
 
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.service, serviceIdList, func(q *measurev1.QueryRequest, data *serviceName) string {
+	invoke(queryGenerate("services", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.service, serviceIdList, func(q *measurev1.QueryRequest, data *serviceName) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
 		return data.original
 	}))
 
 	// instance list
-	responses := invoke(queryGenerate(nil, timestamppb.New(end.Truncate(time.Minute)), o.instanceList, []*serviceName{services[0]}, func(q *measurev1.QueryRequest, data *serviceName) string {
+	responses := invoke(queryGenerate("instances", nil, timestamppb.New(end.Truncate(time.Minute)), o.instanceList, []*serviceName{services[0]}, func(q *measurev1.QueryRequest, data *serviceName) string {
 		le := queryCriteriaLe(q.Criteria)
 		queryCriteriaCondition(le.Left).Value = queryCriterialMinuteTimeBucketValue(end)
 		queryCriteriaCondition(queryCriteriaLe(le.Right).Left).Value = queryCriterialStringValue(data.serviceID())
@@ -544,7 +546,7 @@ func (o *orgServiceMetricsQuery) generate(ctx *executeContext, start, end time.T
 			}
 		}
 	}
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.instanceMetrics, instanceIds, func(q *measurev1.QueryRequest, data *instanceInfo) string {
+	invoke(queryGenerate("instance-metrics", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), o.instanceMetrics, instanceIds, func(q *measurev1.QueryRequest, data *instanceInfo) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.id)
 		return fmt.Sprintf("%s/%s", data.service.original, data.instance)
 	}))
@@ -563,7 +565,7 @@ func newWorkspacePerformanceQuery(path string) measureQuery {
 	}
 }
 
-func (w *workspacePerformanceQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
+func (w *workspacePerformanceQuery) generate(ctx *executeContext, start, end time.Time, invoke func(string, []*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
 	allServices := ctx.allService(func(name *serviceName) bool {
 		return name.highLevelService || name.hostnameService || name.unknownService || name.cluster == serviceNameAny ||
 			name.subset != serviceNameAny || name.env == serviceNameAny || !strings.HasPrefix(name.namespace, "dev-")
@@ -591,7 +593,7 @@ func (w *workspacePerformanceQuery) generate(ctx *executeContext, start, end tim
 	}
 
 	// topn query
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), w.topn, topNArray, func(q *measurev1.QueryRequest, data *serviceNameWithoutService) string {
+	invoke(queryGenerate("topn", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), w.topn, topNArray, func(q *measurev1.QueryRequest, data *serviceNameWithoutService) string {
 		le := queryCriteriaLe(q.Criteria)
 		queryCriteriaCondition(le.Left).Value = queryCriterialStringValue(data.env)
 
@@ -610,7 +612,7 @@ func (w *workspacePerformanceQuery) generate(ctx *executeContext, start, end tim
 	}))
 
 	// service query
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), w.service, allServices, func(q *measurev1.QueryRequest, data *serviceName) string {
+	invoke(queryGenerate("services", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), w.service, allServices, func(q *measurev1.QueryRequest, data *serviceName) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
 		return data.original
 	}))
@@ -635,7 +637,7 @@ func newDashboardTopologyQuery(path string) measureQuery {
 	}
 }
 
-func (d *dashboardTopologyQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
+func (d *dashboardTopologyQuery) generate(ctx *executeContext, start, end time.Time, invoke func(string, []*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
 	// random select two cluster
 	clusters := ctx.randomClusters(2)
 	allServiceIDs := make([]string, 0)
@@ -654,12 +656,12 @@ func (d *dashboardTopologyQuery) generate(ctx *executeContext, start, end time.T
 		}
 	}
 
-	invoke(queryGenerate(nil, nil, d.serviceTraffic, []string{""}, func(q *measurev1.QueryRequest, data string) string {
+	invoke(queryGenerate("serviceTraffic", nil, nil, d.serviceTraffic, []string{""}, func(q *measurev1.QueryRequest, data string) string {
 		return ""
 	}))
 
 	// normal topology query
-	topologyResp := invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.topologyNormal, []string{""}, func(q *measurev1.QueryRequest, data string) string {
+	topologyResp := invoke(queryGenerate("topology", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.topologyNormal, []string{""}, func(q *measurev1.QueryRequest, data string) string {
 		le := queryCriteriaLe(q.Criteria)
 		queryCriteriaCondition(le.Left).Value = queryCriterialStringArray(allServiceWithoutGatewayIDs)
 		le = queryCriteriaLe(le.Right)
@@ -668,7 +670,7 @@ func (d *dashboardTopologyQuery) generate(ctx *executeContext, start, end time.T
 	}))
 
 	// replacement topology query
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.topologyReplace, []string{""}, func(q *measurev1.QueryRequest, data string) string {
+	invoke(queryGenerate("replacement", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.topologyReplace, []string{""}, func(q *measurev1.QueryRequest, data string) string {
 		le := queryCriteriaLe(q.Criteria)
 		queryCriteriaCondition(le.Left).Value = queryCriterialStringArray(allServiceIDs)
 		le = queryCriteriaLe(le.Right)
@@ -679,13 +681,13 @@ func (d *dashboardTopologyQuery) generate(ctx *executeContext, start, end time.T
 	serviceIDs, serviceCallIDs := d.getAllServiceAndRelations(topologyResp)
 
 	// services query
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.services, serviceIDs, func(q *measurev1.QueryRequest, data string) string {
+	invoke(queryGenerate("services", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.services, serviceIDs, func(q *measurev1.QueryRequest, data string) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data)
 		return data
 	}))
 
 	// service calls query
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.serviceCalls, serviceCallIDs, func(q *measurev1.QueryRequest, data string) string {
+	invoke(queryGenerate("serviceCalls", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.serviceCalls, serviceCallIDs, func(q *measurev1.QueryRequest, data string) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data)
 		return data
 	}))
@@ -735,19 +737,19 @@ func newDashboardTopologyServiceQuery(path string) measureQuery {
 	}
 }
 
-func (d *dashboardTopologyServiceQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
+func (d *dashboardTopologyServiceQuery) generate(ctx *executeContext, start, end time.Time, invoke func(string, []*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
 	service := ctx.randomService(1, func(name *serviceName) bool {
 		return name.highLevelService || name.hostnameService || name.unknownService || name.aggrService || !ctx.hasInstanceCheck(name.original)
 	})
 
 	// services query
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.services, service, func(q *measurev1.QueryRequest, data *serviceName) string {
+	invoke(queryGenerate("services", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.services, service, func(q *measurev1.QueryRequest, data *serviceName) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
 		return data.original
 	}))
 
 	// instance list
-	responses := invoke(queryGenerate(nil, timestamppb.New(end.Truncate(time.Minute)), d.instances, service, func(q *measurev1.QueryRequest, data *serviceName) string {
+	responses := invoke(queryGenerate("instances", nil, timestamppb.New(end.Truncate(time.Minute)), d.instances, service, func(q *measurev1.QueryRequest, data *serviceName) string {
 		le := queryCriteriaLe(q.Criteria)
 		queryCriteriaCondition(le.Left).Value = queryCriterialMinuteTimeBucketValue(start)
 		queryCriteriaCondition(queryCriteriaLe(le.Right).Left).Value = queryCriterialStringValue(data.serviceID())
@@ -774,7 +776,7 @@ func (d *dashboardTopologyServiceQuery) generate(ctx *executeContext, start, end
 			}
 		}
 	}
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.instanceMetrics, instanceIds, func(q *measurev1.QueryRequest, data *instanceInfo) string {
+	invoke(queryGenerate("instanceMetrics", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.instanceMetrics, instanceIds, func(q *measurev1.QueryRequest, data *instanceInfo) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.id)
 		return fmt.Sprintf("%s/%s", data.service.original, data.instance)
 	}))
@@ -793,7 +795,7 @@ func newDashboardTopologyEndpointQuery(path string) measureQuery {
 	}
 }
 
-func (d *dashboardTopologyEndpointQuery) generate(ctx *executeContext, start, end time.Time, invoke func([]*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
+func (d *dashboardTopologyEndpointQuery) generate(ctx *executeContext, start, end time.Time, invoke func(string, []*measurev1.QueryRequest, []string) []*measurev1.QueryResponse) {
 	services := ctx.randomService(1, func(name *serviceName) bool {
 		return name.highLevelService || name.hostnameService || name.unknownService || name.aggrService || !ctx.hasEndpointCheck(name.original)
 	})
@@ -802,7 +804,7 @@ func (d *dashboardTopologyEndpointQuery) generate(ctx *executeContext, start, en
 	}
 
 	// query endpoint list
-	endpoints := invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.endpoints, services, func(q *measurev1.QueryRequest, data *serviceName) string {
+	endpoints := invoke(queryGenerate("endpoints", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.endpoints, services, func(q *measurev1.QueryRequest, data *serviceName) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data.serviceID())
 		return data.original
 	}))
@@ -826,7 +828,7 @@ func (d *dashboardTopologyEndpointQuery) generate(ctx *executeContext, start, en
 			}
 		}
 	}
-	invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.endpointMetrics, endpointIDs, func(q *measurev1.QueryRequest, data string) string {
+	invoke(queryGenerate("endpointMetrics", timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.endpointMetrics, endpointIDs, func(q *measurev1.QueryRequest, data string) string {
 		queryCriteriaCondition(q.Criteria).Value = queryCriterialStringValue(data)
 		return data
 	}))
