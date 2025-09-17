@@ -790,6 +790,9 @@ func (d *dashboardTopologyEndpointQuery) generate(ctx *executeContext, start, en
 	services := ctx.randomService(1, func(name *serviceName) bool {
 		return name.highLevelService || name.hostnameService || name.unknownService || name.aggrService || !ctx.hasEndpointCheck(name.original)
 	})
+	if len(services) == 0 {
+		fmt.Println("No service with endpoint found, skip endpoint query")
+	}
 
 	// query endpoint list
 	endpoints := invoke(queryGenerate(timestamppb.New(start.Truncate(time.Minute)), timestamppb.New(end.Truncate(time.Minute)), d.endpoints, services, func(q *measurev1.QueryRequest, data *serviceName) string {
