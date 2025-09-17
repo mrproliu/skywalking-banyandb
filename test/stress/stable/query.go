@@ -69,11 +69,20 @@ type measureQueryExecuteJob struct {
 	entity string
 }
 
+type perQueryStats struct {
+	duration time.Duration
+	count    int
+}
+
+func (p *perQueryStats) String() string {
+	return fmt.Sprintf("%d:%s", p.count, p.duration)
+}
+
 func (m *measureQueryExecutor) execute(c measurev1.MeasureServiceClient) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	var currentQuery measureQuery
-	nameWithTime := make(map[string]time.Duration)
+	nameWithStats := make(map[string]*perQueryStats)
 	invoke := func(name string, v []*measurev1.QueryRequest, e []string) []*measurev1.QueryResponse {
 		result := make([]*measurev1.QueryResponse, len(v))
 		queue := make(chan *measureQueryExecuteJob, len(v))
@@ -109,7 +118,10 @@ func (m *measureQueryExecutor) execute(c measurev1.MeasureServiceClient) {
 		close(queue)
 		wg.Wait()
 		duration := time.Now().Sub(now)
-		nameWithTime[name] += duration
+		nameWithStats[name] = &perQueryStats{
+			duration: duration,
+			count:    len(v),
+		}
 		return result
 	}
 
@@ -127,10 +139,10 @@ func (m *measureQueryExecutor) execute(c measurev1.MeasureServiceClient) {
 		queryTimeStr := ""
 		for _, q := range m.queries {
 			currentQuery = q
-			nameWithTime = make(map[string]time.Duration)
+			nameWithStats = make(map[string]*perQueryStats)
 			queryNow := time.Now()
 			q.generate(ctx, start, end, invoke)
-			queryTimeStr += fmt.Sprintf("\n\t%s: %s(%s)", fmt.Sprintf("%T", q), time.Since(queryNow).String(), nameWithTime)
+			queryTimeStr += fmt.Sprintf("\n\t%s: %s(%s)", fmt.Sprintf("%T", q), time.Since(queryNow).String(), nameWithStats)
 		}
 		fmt.Printf("Queries executed(%d/%d), time cost: %s, each query: %s\n", i, m.eachTimes, time.Since(partNow).String(),
 			queryTimeStr)
@@ -1006,7 +1018,7 @@ func (q *queryStats) writeQueryResult() {
 	if len(q.errorStats) > 0 {
 		details += fmt.Sprintf("Errors: ")
 		for e, c := range q.errorStats {
-			details += fmt.Sprintf("\n\t%s: %d", e, c)
+			details += fmt.Sprintf("\n\t%s: %d", e, atomic.LoadInt64(c))
 		}
 	}
 	if len(q.emptyRespStats) > 0 {
