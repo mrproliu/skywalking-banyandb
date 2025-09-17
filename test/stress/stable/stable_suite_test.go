@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	streamv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/stream/v1"
+	"google.golang.org/protobuf/encoding/protojson"
 	"io"
 	"net/http"
 	"os"
@@ -339,7 +340,12 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 			}
 			return
 		default:
-			if errSend := client.Send(generator.take()); errSend != nil {
+			take := generator.take()
+			if take.Metadata.Name == "instance_traffic_minute" {
+				marshal, _ := protojson.Marshal(take)
+				fmt.Println("taking instance_traffic_minute", string(marshal))
+			}
+			if errSend := client.Send(take); errSend != nil {
 				l.Err(errSend).Msg("failed to send measure")
 				waitFlushSuccess(newConnectionClient, flush)
 				continue
