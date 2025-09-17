@@ -537,7 +537,7 @@ func (o *orgServiceMetricsQuery) generate(ctx *executeContext, start, end time.T
 	// instance list
 	responses := invoke(queryGenerate("instances", nil, timestamppb.New(end.Truncate(time.Minute)), o.instanceList, []*serviceName{services[0]}, func(q *measurev1.QueryRequest, data *serviceName) string {
 		le := queryCriteriaLe(q.Criteria)
-		queryCriteriaCondition(le.Left).Value = queryCriterialMinuteTimeBucketValue(end)
+		queryCriteriaCondition(le.Left).Value = queryCriterialMinuteTimeBucketValue(start)
 		queryCriteriaCondition(queryCriteriaLe(le.Right).Left).Value = queryCriterialStringValue(data.serviceID())
 		return data.original
 	}))
