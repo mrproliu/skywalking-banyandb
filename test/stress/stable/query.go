@@ -103,6 +103,10 @@ func (m *measureQueryExecutor) execute(c measurev1.MeasureServiceClient) {
 					resp, err := c.Query(ctx, j.req)
 					cancel()
 					result[j.idx] = resp
+					if resp != nil && len(resp.DataPoints) == 0 && j.req.Name == "instance_traffic_minute" {
+						marshal, _ := protojson.Marshal(j.req)
+						fmt.Println("empty instance traffic, entity:", j.entity, "query:", string(marshal))
+					}
 
 					d := time.Now().Sub(t)
 					partDurations = append(partDurations, float64(d.Nanoseconds()))
