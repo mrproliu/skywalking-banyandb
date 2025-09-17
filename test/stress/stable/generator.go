@@ -751,7 +751,7 @@ func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo
 			}
 			fmt.Println("generated instance traffic data for ", string(sn), req.DataPoint.TagFamilies[1].Tags[1].Value.(*modelv1.TagValue_Str).Str.Value,
 				":", string(marshal))
-			b.trafficChannel <- r
+			b.trafficChannel <- req
 		}
 	}
 	requests = b.trafficRequests[EntityScopeTypeEndpoint]
@@ -760,7 +760,7 @@ func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo
 			req := proto.Clone(r).(*measurev1.WriteRequest)
 			b.changeMeasureBasicTimestamp(req, downstream.now)
 			req.DataPoint.TagFamilies[0].Tags[1].Value = &modelv1.TagValue_Int{Int: &modelv1.Int{Value: downstream.minuteTimeBucket}}
-			b.trafficChannel <- r
+			b.trafficChannel <- req
 		}
 	}
 
