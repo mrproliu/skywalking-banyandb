@@ -154,8 +154,9 @@ const (
 )
 
 var (
-	generatedLock sync.Mutex
-	generatedMap  = make(map[string]bool)
+	generatedLock        sync.Mutex
+	generatedMap         = make(map[string]bool)
+	generatedServicesMap = make(map[string]bool)
 )
 
 type baseSchema struct {
@@ -528,6 +529,17 @@ func (b *baseSchema) generateServiceName(baseNames []*serviceName, scales *scale
 		if _, exist := generatedMap[baseNames[0].original]; !exist {
 			fmt.Printf("[generated] original service name: %v, generated count: %d\n", baseNames, len(result))
 			generatedMap[baseNames[0].original] = true
+		}
+	} else if len(baseNames) == 2 {
+		generatedLock.Lock()
+		defer generatedLock.Unlock()
+		if _, exist := generatedMap[baseNames[0].original]; !exist {
+			fmt.Printf("[generated] original service name: %v, generated count: %d\n", baseNames, len(result))
+			generatedMap[baseNames[0].original] = true
+		}
+		if _, exist := generatedMap[baseNames[1].original]; !exist {
+			fmt.Printf("[generated from dest] original service name: %v, generated count: %d\n", baseNames, len(result))
+			generatedMap[baseNames[1].original] = true
 		}
 	}
 	return result
