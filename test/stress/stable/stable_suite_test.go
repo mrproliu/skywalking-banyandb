@@ -271,9 +271,7 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 		mu.Lock()
 		defer mu.Unlock()
 		if olderClientFinished != nil {
-			l.Info().Msgf("staring to wait client finished: %p", olderClientFinished)
 			<-olderClientFinished
-			l.Info().Msg("wait client finished successfully")
 		}
 		var err error
 		client, err = c.Write(ctx)
@@ -284,7 +282,6 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 		olderClientFinished = done
 		go func(c grpc.BidiStreamingClient[measurev1.WriteRequest, measurev1.WriteResponse]) {
 			defer func() {
-				l.Info().Msgf("11wait client finished successfully: %p", done)
 				close(done)
 			}()
 			for {
@@ -312,25 +309,21 @@ func startMeasureWrite(ctx context.Context, inx int, connection *grpc.ClientConn
 		lock.Lock()
 		defer lock.Unlock()
 		if client != nil {
-			l.Info().Msg("finishing measure write goroutine")
 			if errClose := client.CloseSend(); errClose != nil {
 				return fmt.Errorf("failed to close send: %w", errClose)
 			}
 		}
 		if !newClient {
-			l.Info().Msg("new client false")
 			return nil
 		}
 		return createClient()
 	}
 
 	generator.notifyNormalWriteFinishRound(func() {
-		l.Info().Msg("staring flush metrics")
 		if errFlush := flush(true); errFlush != nil {
 			l.Err(errFlush).Msg("failed to force flush measure")
 			waitFlushSuccess(newConnectionClient, flush)
 		}
-		l.Info().Msg("finished flush metrics")
 	})
 	for {
 		select {
