@@ -153,6 +153,11 @@ const (
 	schemaTypeStream
 )
 
+var (
+	generatedLock sync.Mutex
+	generatedMap  = make(map[string]bool)
+)
+
 type baseSchema struct {
 	serviceFieldInx     int
 	destServiceFieldInx int
@@ -160,9 +165,6 @@ type baseSchema struct {
 	relatedFields       []*entityField
 	scope               EntityScopeType
 	attrFields          *attrFields
-
-	lock  sync.Mutex
-	exist map[string]bool
 }
 
 func (b *baseSchema) initEntities(name string, tp schemaType, tags []*databasev1.TagFamilySpec, fields []*databasev1.FieldSpec) {
@@ -170,8 +172,6 @@ func (b *baseSchema) initEntities(name string, tp schemaType, tags []*databasev1
 	b.serviceFieldInx = -1
 	b.destServiceFieldInx = -1
 	b.generateEntityScope(name)
-
-	b.exist = make(map[string]bool)
 	for inx, tag := range tags {
 		for subInx, t := range tag.Tags {
 			if field := b.buildEntityIDField(tp, entityIDFieldTypeTag, inx, subInx, t.Name); field != nil {
@@ -523,11 +523,11 @@ func (b *baseSchema) generateServiceName(baseNames []*serviceName, scales *scale
 		}
 	}
 	if len(baseNames) == 1 {
-		b.lock.Lock()
-		defer b.lock.Unlock()
-		if _, exist := b.exist[baseNames[0].original]; !exist {
+		generatedLock.Lock()
+		defer generatedLock.Unlock()
+		if _, exist := generatedMap[baseNames[0].original]; !exist {
 			fmt.Printf("[generated] original service name: %v, generated count: %d\n", baseNames, len(result))
-			b.exist[baseNames[0].original] = true
+			generatedMap[baseNames[0].original] = true
 		}
 	}
 	return result
