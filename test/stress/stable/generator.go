@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -740,17 +739,17 @@ func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo
 			req := proto.Clone(r).(*measurev1.WriteRequest)
 			b.changeMeasureBasicTimestamp(req, downstream.now)
 			req.DataPoint.TagFamilies[0].Tags[0].Value = &modelv1.TagValue_Int{Int: &modelv1.Int{Value: downstream.minuteTimeBucket}}
-			serviceIDTag := req.DataPoint.TagFamilies[1].Tags[0].Value
-			sn, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(serviceIDTag.(*modelv1.TagValue_Str).Str.Value, ".1"))
-			if err != nil {
-				panic(err)
-			}
-			marshal, err := protojson.Marshal(req)
-			if err != nil {
-				panic(err)
-			}
-			fmt.Println("generated instance traffic data for ", string(sn), req.DataPoint.TagFamilies[1].Tags[1].Value.(*modelv1.TagValue_Str).Str.Value,
-				":", string(marshal))
+			//serviceIDTag := req.DataPoint.TagFamilies[1].Tags[0].Value
+			//sn, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(serviceIDTag.(*modelv1.TagValue_Str).Str.Value, ".1"))
+			//if err != nil {
+			//	panic(err)
+			//}
+			//marshal, err := protojson.Marshal(req)
+			//if err != nil {
+			//	panic(err)
+			//}
+			//fmt.Println("generated instance traffic data for ", string(sn), req.DataPoint.TagFamilies[1].Tags[1].Value.(*modelv1.TagValue_Str).Str.Value,
+			//	":", string(marshal))
 			b.trafficChannel <- req
 		}
 	}
