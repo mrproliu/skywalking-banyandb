@@ -175,7 +175,7 @@ func (m *measureQueryExecutor) generateContext() *executeContext {
 		namespaceServices := make(map[string]*serviceNameCombine)
 		clusters := make(map[string]map[string]*serviceNameCombine)
 		for _, t := range serviceTraffics {
-			name := parseServiceName(t.DataPoint.TagFamilies[0].Tags[0].Value.(*modelv1.TagValue_Str).Str.Value)
+			name := parseServiceName(t.DataPoint.TagFamilies[0].Tags[0].Value.(*modelv1.TagValue_Str).Str.Value, true)
 			namespaceServiceKey := fmt.Sprintf("%s/%s", name.namespace, name.service)
 			if name.cluster != serviceNameAny {
 				if _, exist := clusters[name.cluster]; !exist {
