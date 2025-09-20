@@ -62,6 +62,9 @@ var (
 	queryTimes                 = envInt("BANYANDB_TEST_QUERY_TIMES", 50)           // each query will execute how many times
 	queryStatsFilePath         = envString("BANYANDB_TEST_QUERY_STATS_FILE_PATH", filepath.Join(os.TempDir(), "query-stats.txt"))
 	mode                       = envString("BANYANDB_TEST_MODE", "write")
+	writeDataType              = envString("BANYANDB_TEST_WRITE_DATA_TYPE", "measure")
+	zipkinScaleSize            = envInt("BANYANDB_TEST_ZIPKIN_SCALE_SIZE", 1)
+	logScaleSize               = envInt("BANYANDB_TEST_LOG_SCALE_SIZE", 1)
 
 	k8sClient              *kubernetes.Clientset
 	k8sRestConfig          *rest.Config
@@ -145,12 +148,13 @@ var _ = g.Describe("Stable", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Starting the data generators
-		measureGenerator, err := newMeasureDataGenerator(measureAccessLogPath, mode, &scalerCounts{
+		scales := &scalerCounts{
 			cluster:  scaleClusterCount,
 			service:  scaleServiceCount,
 			instance: scaleInstanceCount,
 			endpoint: scaleEndpointCount,
-		}, measureBulkSize*clientCount*5, measureSchemas)
+		}
+		measureGenerator, err := newMeasureDataGenerator(measureAccessLogPath, mode, scales, measureBulkSize*clientCount*5, measureSchemas)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		queryExecutor := newMeasureQueryExecutor(queryParallelsCount, queryTimes, queryStatsFilePath, measureGenerator,
@@ -171,12 +175,12 @@ var _ = g.Describe("Stable", func() {
 			})
 		}
 
-		////streamGenerator, err := newStreamDataGenerator(streamAccessLogPath, scaleServiceCount,
-		////	measureBulkSize*clientCount*5, streamSchemas, measureGenerator)
-		////gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		//
+		streamGenerator, err := newStreamDataGenerator(streamAccessLogPath, mode, scales, measureBulkSize*clientCount*5, streamSchemas,
+			newZipkinSpanTransformer(zipkinScaleSize),
+			newLogTransformer(logScaleSize))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		// starting the batch write
-		startBatch(connections, measureGenerator, nil, totalBenchmarkTime)
+		startBatch(connections, measureGenerator, streamGenerator, totalBenchmarkTime)
 	})
 })
 
@@ -199,31 +203,39 @@ func startBatch(
 	allClientStarted.Add(len(connections))
 	statics := make([]*clientStatics, len(connections))
 	for i := range connections {
-		measureClientDone.Add(1)
 		statics[i] = newClientStatics(i)
-		go func(inx int, conn *grpc.ClientConn, s *clientStatics) {
-			allClientStarted.Done()
-			defer func() {
-				measureClientDone.Done()
-				g.GinkgoRecover()
-			}()
-			startMeasureWrite(ctx, inx, conn, measureGenerator, s)
-		}(i, connections[i], statics[i])
+		if writeDataType == "measure" {
+			measureClientDone.Add(1)
+			go func(inx int, conn *grpc.ClientConn, s *clientStatics) {
+				allClientStarted.Done()
+				defer func() {
+					g.GinkgoRecover()
+					measureClientDone.Done()
+				}()
+				startMeasureWrite(ctx, inx, conn, measureGenerator, s)
+			}(i, connections[i], statics[i])
+		}
 
-		//go func(inx int, conn *grpc.ClientConn, s *clientStatics) {
-		//	allClientStarted.Done()
-		//	defer func() {
-		//		streamClientDone.Done()
-		//		g.GinkgoRecover()
-		//	}()
-		//	startStreamWrite(ctx, inx, conn, streamGenerator, s)
-		//}(i, connections[i], statics[i])
+		if writeDataType == "stream" {
+			measureClientDone.Add(1)
+			go func(inx int, conn *grpc.ClientConn, s *clientStatics) {
+				allClientStarted.Done()
+				defer func() {
+					g.GinkgoRecover()
+					streamClientDone.Done()
+				}()
+				startStreamWrite(ctx, inx, conn, streamGenerator, s)
+			}(i, connections[i], statics[i])
+		}
 	}
 
 	allClientStarted.Wait()
-	fmt.Println("all measure write clients started")
-	measureGenerator.start()
-	//streamGenerator.start()
+	fmt.Println("all", writeDataType, "write clients started")
+	if writeDataType == "measure" {
+		measureGenerator.start()
+	} else if writeDataType == "stream" {
+		streamGenerator.start()
+	}
 
 	if mode == "write" {
 		go func() {
