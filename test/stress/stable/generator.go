@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/onsi/gomega"
@@ -37,7 +39,7 @@ type baseGenerator[Request proto.Message] struct {
 	requestGenerator    func() Request
 	getSchema           func(Request) schema[Request]
 	getDataFromChannels func(dataChannel chan requestWrapper[Request]) (*requestWrapper[Request], bool)
-	postGenerate        func(scaler *dataScaler[Request], serviceNames []string, subEntityName string, request Request, downstream *downstreamTimeInfo) bool
+	postGenerate        func(scaler *dataScaler[Request], serviceNames []string, subEntityName string, request Request, downstream *downstreamTimeInfo) []Request
 	normalWriteFinish   func()
 	currentFile         *os.File
 	cancel              context.CancelFunc
@@ -58,7 +60,7 @@ func newBaseGenerator[Request proto.Message](
 	generate func() Request,
 	getSchema func(Request) schema[Request],
 	getDataFromChannels func(dataChannel chan requestWrapper[Request]) (*requestWrapper[Request], bool),
-	postGenerate func(scaler *dataScaler[Request], serviceNames []string, subEntityName string, request Request, downstream *downstreamTimeInfo) bool,
+	postGenerate func(scaler *dataScaler[Request], serviceNames []string, subEntityName string, request Request, downstream *downstreamTimeInfo) []Request,
 ) (*baseGenerator[Request], error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -335,8 +337,13 @@ func newDataScaler[T proto.Message](schema schema[T], request T, scales *scalerC
 		panic(err)
 	}
 	serviceNames := make([]*serviceName, 0, len(baseServiceNames))
+	forceServiceName := true
+	// stream type service name may not formated
+	if schema.GetType() == schemaTypeStream {
+		forceServiceName = false
+	}
 	for _, name := range baseServiceNames {
-		serviceNames = append(serviceNames, parseServiceName(name))
+		serviceNames = append(serviceNames, parseServiceName(name, forceServiceName))
 	}
 	subEntity, all := schema.GetRelatedFieldValues(request)
 	var subEntityName string
@@ -390,10 +397,10 @@ func (d *dataScaler[T]) generate(downstream *downstreamTimeInfo, generator *base
 		totalCount *= d.scales.endpoint
 	}
 	addOrIgnore := func(data T, serviceNames []string, subEntity string) {
-		if ignore := generator.postGenerate(d, serviceNames, subEntity, data, downstream); ignore {
-			return
+		result := generator.postGenerate(d, serviceNames, subEntity, data, downstream)
+		for _, v := range result {
+			add(v)
 		}
-		add(data)
 	}
 	if d.schema.GetType() == schemaTypeMeasure && len(d.baseServiceNames) == 0 {
 		panic(fmt.Sprintf("schema cannot found any service entity: %s", d.schema.GetName()))
@@ -484,10 +491,10 @@ func newMeasureDataGenerator(dir string, mode string, scales *scalerCounts, requ
 		return schemas[request.Metadata.Name]
 	}, func(dataChannel chan requestWrapper[*measurev1.WriteRequest]) (*requestWrapper[*measurev1.WriteRequest], bool) {
 		return nil, false
-	}, func(scaler *dataScaler[*measurev1.WriteRequest], serviceNames []string, _ string, request *measurev1.WriteRequest, downstream *downstreamTimeInfo) bool {
+	}, func(scaler *dataScaler[*measurev1.WriteRequest], serviceNames []string, _ string, request *measurev1.WriteRequest, downstream *downstreamTimeInfo) []*measurev1.WriteRequest {
 		request.DataPoint.Timestamp = timestamppb.New(measureGenerator.adjustTimeFromTime(request.DataPoint.Timestamp.AsTime(), downstream))
 		request.Metadata.ModRevision = 0
-		return false
+		return []*measurev1.WriteRequest{request}
 	})
 	if err != nil {
 		return nil, err
@@ -498,10 +505,10 @@ func newMeasureDataGenerator(dir string, mode string, scales *scalerCounts, requ
 		return schemas[request.Metadata.Name]
 	}, func(dataChannel chan requestWrapper[*measurev1.WriteRequest]) (*requestWrapper[*measurev1.WriteRequest], bool) {
 		return nil, false
-	}, func(scaler *dataScaler[*measurev1.WriteRequest], serviceNames []string, _ string, request *measurev1.WriteRequest, downstream *downstreamTimeInfo) bool {
+	}, func(scaler *dataScaler[*measurev1.WriteRequest], serviceNames []string, _ string, request *measurev1.WriteRequest, downstream *downstreamTimeInfo) []*measurev1.WriteRequest {
 		request.DataPoint.Timestamp = timestamppb.New(measureGenerator.adjustTimeFromTime(request.DataPoint.Timestamp.AsTime(), downstream))
 		request.Metadata.ModRevision = 0
-		return false
+		return []*measurev1.WriteRequest{request}
 	})
 	if err != nil {
 		return nil, err
@@ -524,7 +531,7 @@ func newMeasureDataGenerator(dir string, mode string, scales *scalerCounts, requ
 		default:
 		}
 		return nil, false
-	}, func(scaler *dataScaler[*measurev1.WriteRequest], serviceNames []string, subEntityName string, request *measurev1.WriteRequest, downstream *downstreamTimeInfo) bool {
+	}, func(scaler *dataScaler[*measurev1.WriteRequest], serviceNames []string, subEntityName string, request *measurev1.WriteRequest, downstream *downstreamTimeInfo) []*measurev1.WriteRequest {
 		for _, serviceName := range serviceNames {
 			measureGenerator.registerServiceTraffic(serviceName)
 		}
@@ -537,12 +544,12 @@ func newMeasureDataGenerator(dir string, mode string, scales *scalerCounts, requ
 		// if the access log is related to the traffic, then just ignore it, because the register will send them
 		if measureName == "service_traffic_minute" || measureName == "instance_traffic_minute" ||
 			measureName == "endpoint_traffic_minute" {
-			return true
+			return nil
 		}
 		request.DataPoint.Timestamp = timestamppb.New(measureGenerator.adjustTimeFromTime(request.DataPoint.Timestamp.AsTime(), downstream))
 		request.Metadata.ModRevision = 0
 
-		return false
+		return []*measurev1.WriteRequest{request}
 	})
 	if err != nil {
 		return nil, err
@@ -770,13 +777,22 @@ func (b *measureDataGenerator) afterInitDataRound(downstream *downstreamTimeInfo
 	}
 }
 
+type streamDataTransformer interface {
+	name() string
+	transform(request *streamv1.WriteRequest, downstream *downstreamTimeInfo, scales *scalerCounts) []*streamv1.WriteRequest
+}
+
 type streamDataGenerator struct {
 	*baseGenerator[*streamv1.WriteRequest]
 
 	schema map[string]*StreamSchema
 }
 
-func newStreamDataGenerator(path, mode string, scaleCounts *scalerCounts, requestChannelSize int, schemas map[string]*StreamSchema, measureGenerator *measureDataGenerator) (*streamDataGenerator, error) {
+func newStreamDataGenerator(path, mode string, scaleCounts *scalerCounts, requestChannelSize int, schemas map[string]*StreamSchema, transformers ...streamDataTransformer) (*streamDataGenerator, error) {
+	transformerMap := make(map[string]streamDataTransformer)
+	for _, t := range transformers {
+		transformerMap[t.name()] = t
+	}
 	generator, err := newBaseGenerator[*streamv1.WriteRequest](path, mode, scaleCounts, requestChannelSize, func() *streamv1.WriteRequest {
 		return &streamv1.WriteRequest{}
 	}, func(request *streamv1.WriteRequest) schema[*streamv1.WriteRequest] {
@@ -788,14 +804,13 @@ func newStreamDataGenerator(path, mode string, scaleCounts *scalerCounts, reques
 		default:
 		}
 		return nil, false
-	}, func(scaler *dataScaler[*streamv1.WriteRequest], serviceNames []string, subEntity string, request *streamv1.WriteRequest, downstream *downstreamTimeInfo) bool {
-		for _, serviceName := range serviceNames {
-			measureGenerator.registerServiceTraffic(serviceName)
-		}
-		request.Element.Timestamp = timestamppb.New(time.Now())
+	}, func(scaler *dataScaler[*streamv1.WriteRequest], serviceNames []string, subEntity string, request *streamv1.WriteRequest, downstream *downstreamTimeInfo) []*streamv1.WriteRequest {
 		request.Metadata.ModRevision = 0
-
-		return false
+		if transformer, exist := transformerMap[scaler.schema.GetName()]; exist {
+			return transformer.transform(request, downstream, scaleCounts)
+		} else {
+			panic("cannot found transformer for stream: " + scaler.schema.GetName())
+		}
 	})
 	if err != nil {
 		return nil, err
@@ -808,4 +823,76 @@ func newStreamDataGenerator(path, mode string, scaleCounts *scalerCounts, reques
 
 func (s *streamDataGenerator) start() {
 	s.baseGenerator.start(nil)
+}
+
+type zipkinSpanTransformer struct {
+	traceScale int
+	count      *int64
+}
+
+func newZipkinSpanTransformer(traceScale int) *zipkinSpanTransformer {
+	return &zipkinSpanTransformer{traceScale: traceScale, count: new(int64)}
+}
+
+func (z *zipkinSpanTransformer) name() string {
+	return "zipkin_span"
+}
+
+func (z *zipkinSpanTransformer) transform(request *streamv1.WriteRequest, downstream *downstreamTimeInfo, scales *scalerCounts) []*streamv1.WriteRequest {
+	timestamp := request.Element.TagFamilies[0].Tags[1].Value.(*modelv1.TagValue_Int).Int.Value
+	secondInMinute := (timestamp / 1000000) % 60
+	microInSecond := timestamp % 1000000
+	relativeTime := downstream.minute.Add(time.Duration(secondInMinute) * time.Second).Add(time.Duration(microInSecond) * time.Microsecond)
+
+	request.Element.TagFamilies[0].Tags[0].Value = &modelv1.TagValue_Int{Int: &modelv1.Int{Value: relativeTime.UnixMilli()}}
+	request.Element.TagFamilies[0].Tags[1].Value = &modelv1.TagValue_Int{Int: &modelv1.Int{Value: relativeTime.UnixMicro()}}
+	request.Element.Timestamp = timestamppb.New(relativeTime)
+
+	traceID := request.Element.TagFamilies[1].Tags[0].Value.(*modelv1.TagValue_Str).Str.Value
+
+	result := make([]*streamv1.WriteRequest, 0, z.traceScale)
+	for _ = range z.traceScale {
+		newReq := proto.Clone(request).(*streamv1.WriteRequest)
+		updateTraceID := fmt.Sprintf("%s-%d", traceID, atomic.AddInt64(z.count, 1))
+		newReq.Element.TagFamilies[1].Tags[0].Value = &modelv1.TagValue_Str{Str: &modelv1.Str{Value: updateTraceID}}
+		_, after, found := strings.Cut(newReq.Element.ElementId, "_")
+		if !found {
+			panic("invalid span id: " + newReq.Element.ElementId)
+		}
+		newReq.Element.ElementId = fmt.Sprintf("%s_%s", updateTraceID, after)
+		result = append(result, newReq)
+	}
+	return result
+}
+
+type logTransformer struct {
+	scaleCount int
+	count      *int64
+}
+
+func newLogTransformer(scaleCount int) *logTransformer {
+	return &logTransformer{scaleCount: scaleCount, count: new(int64)}
+}
+
+func (l *logTransformer) name() string {
+	return "log"
+}
+
+func (l *logTransformer) transform(request *streamv1.WriteRequest, downstream *downstreamTimeInfo, scales *scalerCounts) []*streamv1.WriteRequest {
+	timestamp := request.Element.Timestamp.AsTime()
+	secondInMinute := timestamp.Second()
+	microInSecond := timestamp.UnixMicro() % 1000000
+	relativeTime := downstream.minute.Add(time.Duration(secondInMinute) * time.Second).Add(time.Duration(microInSecond) * time.Nanosecond)
+
+	request.Element.Timestamp = timestamppb.New(relativeTime)
+
+	result := make([]*streamv1.WriteRequest, 0, l.scaleCount)
+	for _ = range l.scaleCount {
+		newReq := proto.Clone(request).(*streamv1.WriteRequest)
+		addedCount := atomic.AddInt64(l.count, 1)
+		newReq.Element.ElementId = fmt.Sprintf("%s_%d", newReq.Element.ElementId, addedCount)
+		newReq.Element.TagFamilies[1].Tags[0].Value = &modelv1.TagValue_Str{Str: &modelv1.Str{Value: fmt.Sprintf("%s_%d", newReq.Element.TagFamilies[1].Tags[0].Value.(*modelv1.TagValue_Str).Str.Value, addedCount)}}
+		result = append(result, newReq)
+	}
+	return result
 }
