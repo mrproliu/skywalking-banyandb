@@ -90,7 +90,7 @@ type attrFields struct {
 }
 
 func (a *attrFields) applyChanges(tagFamilies []*modelv1.TagFamilyForWrite, service string) {
-	name := parseServiceName(service)
+	name := parseServiceName(service, true)
 	if name.highLevelService || name.unknownService {
 		return
 	}
@@ -229,7 +229,8 @@ func (b *baseSchema) generateEntityScope(name string) {
 		strings.HasPrefix(name, "k8s_tcp_service_instance"),
 		strings.HasPrefix(name, "satellite_service_"),
 		strings.HasPrefix(name, "service_instance_"),
-		strings.HasPrefix(name, "tcp_service_instance_"):
+		strings.HasPrefix(name, "tcp_service_instance_"),
+		name == "log":
 		scope = EntityScopeTypeServiceInstance
 
 	default:
@@ -509,6 +510,10 @@ func (b *baseSchema) generateServiceName(baseNames []*serviceName, scales *scale
 		for serviceInx := range scales.service {
 			serviceNames := make([]string, 0, len(baseNames))
 			for _, service := range baseNames {
+				if service.unknownTypeService {
+					serviceNames = append(serviceNames, fmt.Sprintf("%s-%d", service.service, serviceInx))
+					continue
+				}
 				clusterName := fmt.Sprintf("%s-%d", service.cluster, clusterInx)
 				if service.cluster == "*" {
 					clusterName = service.cluster
@@ -894,15 +899,16 @@ type serviceName struct {
 	env       string
 	hostname  string
 
-	hostnameService  bool
-	unknownService   bool
-	highLevelService bool
-	aggrService      bool
+	hostnameService    bool
+	unknownService     bool
+	highLevelService   bool
+	aggrService        bool
+	unknownTypeService bool
 
 	original string
 }
 
-func parseServiceName(name string) *serviceName {
+func parseServiceName(name string, force bool) *serviceName {
 	parts := strings.Split(name, serviceNameSplit)
 	l := len(parts)
 
@@ -941,7 +947,12 @@ func parseServiceName(name string) *serviceName {
 		s.unknownService = s.service == serviceNameUnknown && s.namespace == serviceNameAny
 		s.aggrService = s.subset == serviceNameAny || s.cluster == serviceNameAny
 	default:
-		panic(fmt.Sprintf("invalid serviceName: %s", name))
+		if force {
+			panic(fmt.Sprintf("invalid serviceName: %s", name))
+		} else {
+			s.service = parts[0]
+			s.unknownTypeService = true
+		}
 	}
 
 	return s
@@ -953,11 +964,11 @@ func (s *serviceName) serviceID() string {
 
 func (s *serviceName) toService(subset, cluster, service, env string) *serviceName {
 	if s.hostnameService {
-		return parseServiceName(strings.Join([]string{s.hostname, service, cluster, env}, serviceNameSplit))
+		return parseServiceName(strings.Join([]string{s.hostname, service, cluster, env}, serviceNameSplit), true)
 	} else if s.highLevelService {
-		return parseServiceName(strings.Join([]string{service, s.namespace, cluster}, serviceNameSplit))
+		return parseServiceName(strings.Join([]string{service, s.namespace, cluster}, serviceNameSplit), true)
 	}
-	return parseServiceName(strings.Join([]string{subset, service, s.namespace, cluster, env}, serviceNameSplit))
+	return parseServiceName(strings.Join([]string{subset, service, s.namespace, cluster, env}, serviceNameSplit), true)
 }
 
 func (s *serviceName) String() string {
