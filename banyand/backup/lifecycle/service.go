@@ -216,6 +216,10 @@ func (l *lifecycleService) action() error {
 				continue
 			}
 			l.processMeasureGroup(ctx, g, measureDir, nodes, labels, progress)
+		case commonv1.Catalog_CATALOG_TRACE:
+			progress.MarkGroupCompleted(g.Metadata.Name)
+			l.l.Info().Msgf("group trace not supported, skipping group: %s", g.Metadata.Name)
+			continue
 		default:
 			l.l.Info().Msgf("group catalog: %s doesn't support lifecycle management", g.Catalog)
 		}
