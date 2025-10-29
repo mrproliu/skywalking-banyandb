@@ -48,5 +48,5 @@ docker.push: DOCKER_TYPE = "Push"
 docker docker.push:
 	@echo "$(DOCKER_TYPE) $(IMG) with platform $(PLATFORMS)"
 	@pwd
-	time docker buildx build $(DOCKER_BUILD_ARGS) --platform $(PLATFORMS) $(LOAD_OR_PUSH) -t $(IMG) -f Dockerfile --provenance=false --build-arg BINARYTYPE=$(BINARYTYPE) .
+	time docker buildx build $(DOCKER_BUILD_ARGS) --platform $(PLATFORMS) $(LOAD_OR_PUSH) -t $(IMG) -f Dockerfile --no-cache --provenance=false --build-arg BINARYTYPE=$(BINARYTYPE) .
 
