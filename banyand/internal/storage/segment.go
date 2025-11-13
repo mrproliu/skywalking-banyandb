@@ -596,14 +596,26 @@ func (sc *segmentController[T, O]) deleteExpiredSegments(timeRange timestamp.Tim
 	ss, _ := sc.segments(false)
 	sc.l.Info().Str("time_range", timeRange.String()).
 		Str("ttl", fmt.Sprintf("%d(%s)", sc.opts.TTL.Num, sc.opts.TTL.Unit)).
-		Str("deadline", deadline.String()).Msg("deleting expired segments")
+		Str("deadline", deadline.String()).
+		Int("total_segment_count", len(ss)).Msg("deleting expired segments")
 	for _, s := range ss {
 		if s.Before(deadline) && timeRange.Include(s.GetTimeRange()) {
+			sc.l.Info().Str("time_range", timeRange.String()).
+				Str("deadline", deadline.String()).
+				Str("segment_name", s.String()).
+				Str("segment_time_range", s.GetTimeRange().String()).
+				Msg("deleting an expired segment")
 			s.delete()
 			sc.Lock()
 			sc.removeSeg(s.id)
 			sc.Unlock()
 			count++
+		} else {
+			sc.l.Info().Str("time_range", timeRange.String()).
+				Str("deadline", deadline.String()).
+				Str("segment_name", s.String()).
+				Str("segment_time_range", s.GetTimeRange().String()).
+				Msg("segment is not expired or not in the time range, skipping deletion")
 		}
 		s.DecRef()
 	}
