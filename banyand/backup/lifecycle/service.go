@@ -568,7 +568,7 @@ func (l *lifecycleService) processStreamGroup(ctx context.Context, g *commonv1.G
 		return
 	}
 
-	l.l.Info().Msgf("deleting expired stream segments for group: %s", g.Metadata.Name)
+	l.l.Info().Msgf("deleting expired stream segments for group: %s, time range: %s", g.Metadata.Name, tr.String())
 	l.deleteExpiredStreamSegments(ctx, g, tr, progress)
 	progress.MarkGroupCompleted(g.Metadata.Name)
 }
@@ -582,7 +582,7 @@ func (l *lifecycleService) processStreamGroupFileBased(_ context.Context, g *com
 		return nil
 	}
 
-	l.l.Info().Msgf("starting file-based stream migration for group: %s", g.Metadata.Name)
+	l.l.Info().Msgf("starting file-based stream migration for group: %s, time range: %s", g.Metadata.Name, tr.String())
 
 	rootDir := filepath.Join(streamDir, g.Metadata.Name)
 	// skip the counting if the tsdb root path does not exist

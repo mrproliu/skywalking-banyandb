@@ -25,8 +25,11 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/apache/skywalking-banyandb/api/common"
+	"github.com/apache/skywalking-banyandb/pkg/logger"
 	"github.com/apache/skywalking-banyandb/pkg/timestamp"
 )
+
+var log = logger.GetLogger("storage", "visitor")
 
 // SegmentVisitor defines the interface for visiting segment components.
 type SegmentVisitor interface {
@@ -53,10 +56,16 @@ func VisitSegmentsInTimeRange(tsdbRootPath string, timeRange timestamp.TimeRange
 		segTR := timestamp.NewSectionTimeRange(startTime, endTime)
 
 		// Check if segment is completely included in the requested time range
+		logEntry := log.Info().Str("segment_suffix", suffix).
+			Str("interval_rule", fmt.Sprintf("%d(%s)", intervalRule.Num, intervalRule.Unit)).
+			Str("total_time_range", timeRange.String()).
+			Str("segment_time_range", segTR.String())
 		if !timeRange.Include(segTR) {
+			logEntry.Msg("segment time range is not included")
 			return nil // Skip segments not fully contained in the time range
 		}
 
+		logEntry.Msg("segment time range is include")
 		segmentPath := filepath.Join(tsdbRootPath, fmt.Sprintf(segTemplate, suffix))
 		segmentPaths = append(segmentPaths, segmentInfo{
 			path:      segmentPath,

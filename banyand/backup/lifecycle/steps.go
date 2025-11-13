@@ -22,6 +22,7 @@ import (
 	"os"
 
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/apache/skywalking-banyandb/api/data"
 	commonv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/common/v1"
@@ -87,12 +88,14 @@ func parseGroup(g *commonv1.Group, nodeLabels map[string]string, nodes []*databa
 	if len(ro.Stages) == 0 {
 		return 0, 0, nil, nil, nil, fmt.Errorf("no stages in group %s", g.Metadata.Name)
 	}
+	ttlTime := proto.Clone(ro.Ttl).(*commonv1.IntervalRule)
 	var nst *commonv1.LifecycleStage
 	for i, st := range ro.Stages {
 		selector, err := pub.ParseLabelSelector(st.NodeSelector)
 		if err != nil {
 			return 0, 0, nil, nil, nil, errors.WithMessagef(err, "failed to parse node selector %s", st.NodeSelector)
 		}
+		ttlTime.Num += st.Ttl.Num
 		if !selector.Matches(nodeLabels) {
 			continue
 		}
@@ -101,11 +104,15 @@ func parseGroup(g *commonv1.Group, nodeLabels map[string]string, nodes []*databa
 			return 0, 0, nil, nil, nil, nil
 		}
 		nst = ro.Stages[i+1]
-		l.Info().Msgf("migrating group %s at stage %s to stage %s", g.Metadata.Name, st.Name, nst.Name)
+		l.Info().Msgf("migrating group %s at stage %s to stage %s, total ttl needs: %d(%s)",
+			g.Metadata.Name, st.Name, nst.Name, ttlTime.Num, ttlTime.Unit.String())
 		break
 	}
 	if nst == nil {
 		nst = ro.Stages[0]
+		ttlTime = proto.Clone(ro.Ttl).(*commonv1.IntervalRule)
+		l.Info().Msgf("no matching stage for group %s, defaulting to first stage %s, total ttl needs: %d(%s)",
+			g.Metadata.Name, nst.Name, ttlTime.Num, ttlTime.Unit.String())
 	}
 	nsl, err := pub.ParseLabelSelector(nst.NodeSelector)
 	if err != nil {
@@ -140,7 +147,7 @@ func parseGroup(g *commonv1.Group, nodeLabels map[string]string, nodes []*databa
 	if !existed {
 		return 0, 0, nil, nil, nil, errors.New("no nodes matched")
 	}
-	return nst.ShardNum, nst.Replicas, nst.Ttl, nodeSel, client, nil
+	return nst.ShardNum, nst.Replicas, ttlTime, nodeSel, client, nil
 }
 
 type fileInfo struct {
