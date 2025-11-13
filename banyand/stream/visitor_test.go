@@ -104,7 +104,7 @@ func TestVisitStreamsInTimeRange(t *testing.T) {
 	}
 	intervalRule := storage.IntervalRule{Unit: storage.HOUR, Num: 1}
 
-	err = VisitStreamsInTimeRange(tmpDir, timeRange, visitor, intervalRule)
+	err = VisitStreamsInTimeRange(tmpDir, timeRange, visitor, intervalRule, nil)
 	require.NoError(t, err)
 
 	// Verify visits occurred

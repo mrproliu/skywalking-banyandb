@@ -42,7 +42,7 @@ func migrateStreamWithFileBasedAndProgress(
 	chunkSize int,
 ) error {
 	// Use parseGroup function to get sharding parameters and TTL
-	shardNum, replicas, ttl, selector, client, err := parseGroup(group, nodeLabels, nodes, logger, metadata)
+	shardNum, replicas, ttl, segmentInterval, selector, client, err := parseGroup(group, nodeLabels, nodes, logger, metadata)
 	if err != nil {
 		return err
 	}
@@ -50,12 +50,13 @@ func migrateStreamWithFileBasedAndProgress(
 
 	// Convert TTL to IntervalRule using storage.MustToIntervalRule
 	intervalRule := storage.MustToIntervalRule(ttl)
+	segmentIntervalRule := storage.MustToIntervalRule(segmentInterval)
 
 	// Get target stage configuration
 	targetStageInterval := getTargetStageInterval(group)
 
 	// Count total parts before starting migration
-	totalParts, err := countStreamParts(tsdbRootPath, timeRange, intervalRule)
+	totalParts, err := countStreamParts(tsdbRootPath, timeRange, intervalRule, segmentIntervalRule)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to count stream parts, proceeding without part count")
 	} else {
@@ -72,16 +73,16 @@ func migrateStreamWithFileBasedAndProgress(
 	}
 
 	// Use the existing VisitStreamsInTimeRange function with our file-based visitor
-	return stream.VisitStreamsInTimeRange(tsdbRootPath, timeRange, visitor, intervalRule)
+	return stream.VisitStreamsInTimeRange(tsdbRootPath, timeRange, visitor, intervalRule, segmentIntervalRule)
 }
 
 // countStreamParts counts the total number of parts in the given time range.
-func countStreamParts(tsdbRootPath string, timeRange timestamp.TimeRange, intervalRule storage.IntervalRule) (int, error) {
+func countStreamParts(tsdbRootPath string, timeRange timestamp.TimeRange, intervalRule, segmentInterval storage.IntervalRule) (int, error) {
 	// Create a simple visitor to count parts
 	partCounter := &partCountVisitor{}
 
 	// Use the existing VisitStreamsInTimeRange function to count parts
-	err := stream.VisitStreamsInTimeRange(tsdbRootPath, timeRange, partCounter, intervalRule)
+	err := stream.VisitStreamsInTimeRange(tsdbRootPath, timeRange, partCounter, intervalRule, segmentInterval)
 	if err != nil {
 		return 0, err
 	}
@@ -123,7 +124,7 @@ func migrateMeasureWithFileBasedAndProgress(
 	chunkSize int,
 ) error {
 	// Use parseGroup function to get sharding parameters and TTL
-	shardNum, replicas, ttl, selector, client, err := parseGroup(group, nodeLabels, nodes, logger, metadata)
+	shardNum, replicas, ttl, segmentInterval, selector, client, err := parseGroup(group, nodeLabels, nodes, logger, metadata)
 	if err != nil {
 		return err
 	}
@@ -131,12 +132,13 @@ func migrateMeasureWithFileBasedAndProgress(
 
 	// Convert TTL to IntervalRule using storage.MustToIntervalRule
 	intervalRule := storage.MustToIntervalRule(ttl)
+	segmentIntervalRule := storage.MustToIntervalRule(segmentInterval)
 
 	// Get target stage configuration
 	targetStageInterval := getTargetStageInterval(group)
 
 	// Count total parts before starting migration
-	totalParts, err := countMeasureParts(tsdbRootPath, timeRange, intervalRule)
+	totalParts, err := countMeasureParts(tsdbRootPath, timeRange, intervalRule, segmentIntervalRule)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to count measure parts, proceeding without part count")
 	} else {
@@ -153,16 +155,16 @@ func migrateMeasureWithFileBasedAndProgress(
 	}
 
 	// Use the existing VisitMeasuresInTimeRange function with our file-based visitor
-	return measure.VisitMeasuresInTimeRange(tsdbRootPath, timeRange, visitor, intervalRule)
+	return measure.VisitMeasuresInTimeRange(tsdbRootPath, timeRange, visitor, intervalRule, segmentIntervalRule)
 }
 
 // countMeasureParts counts the total number of parts in the given time range.
-func countMeasureParts(tsdbRootPath string, timeRange timestamp.TimeRange, intervalRule storage.IntervalRule) (int, error) {
+func countMeasureParts(tsdbRootPath string, timeRange timestamp.TimeRange, intervalRule, segmentIntervalRule storage.IntervalRule) (int, error) {
 	// Create a simple visitor to count parts
 	partCounter := &measurePartCountVisitor{}
 
 	// Use the existing VisitMeasuresInTimeRange function to count parts
-	err := measure.VisitMeasuresInTimeRange(tsdbRootPath, timeRange, partCounter, intervalRule)
+	err := measure.VisitMeasuresInTimeRange(tsdbRootPath, timeRange, partCounter, intervalRule, segmentIntervalRule)
 	if err != nil {
 		return 0, err
 	}

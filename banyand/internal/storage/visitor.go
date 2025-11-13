@@ -42,7 +42,7 @@ type SegmentVisitor interface {
 // VisitSegmentsInTimeRange traverses segments within the specified time range
 // and calls the visitor methods for series index and shard directories.
 // This function works directly with the filesystem without requiring a database instance.
-func VisitSegmentsInTimeRange(tsdbRootPath string, timeRange timestamp.TimeRange, visitor SegmentVisitor, intervalRule IntervalRule) error {
+func VisitSegmentsInTimeRange(tsdbRootPath string, timeRange timestamp.TimeRange, visitor SegmentVisitor, intervalRule IntervalRule, segmentInterval IntervalRule) error {
 	// Parse segment directories in the root path
 	var segmentPaths []segmentInfo
 	err := walkDir(tsdbRootPath, segPathPrefix, func(suffix string) error {
@@ -52,7 +52,11 @@ func VisitSegmentsInTimeRange(tsdbRootPath string, timeRange timestamp.TimeRange
 		}
 
 		// Calculate end time based on interval rule
+		segmentEndTime := segmentInterval.NextTime(startTime)
 		endTime := intervalRule.NextTime(startTime)
+		if segmentEndTime.After(endTime) {
+			endTime = segmentEndTime
+		}
 		segTR := timestamp.NewSectionTimeRange(startTime, endTime)
 
 		// Check if segment is completely included in the requested time range
