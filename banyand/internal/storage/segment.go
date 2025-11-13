@@ -599,7 +599,7 @@ func (sc *segmentController[T, O]) deleteExpiredSegments(timeRange timestamp.Tim
 		Str("deadline", deadline.String()).
 		Int("total_segment_count", len(ss)).Msg("deleting expired segments")
 	for _, s := range ss {
-		if s.Before(deadline) && timeRange.Include(s.GetTimeRange()) {
+		if s.Before(deadline) && s.Overlapping(timeRange) {
 			sc.l.Info().Str("time_range", timeRange.String()).
 				Str("deadline", deadline.String()).
 				Str("segment_name", s.String()).
