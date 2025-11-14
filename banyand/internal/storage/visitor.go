@@ -57,6 +57,7 @@ func VisitSegmentsInTimeRange(tsdbRootPath string, timeRange timestamp.TimeRange
 
 		// Check if segment is completely included in the requested time range
 		logEntry := log.Info().Str("segment_suffix", suffix).
+			Str("tsdb_root_path", tsdbRootPath).
 			Str("segment_interval_rule", fmt.Sprintf("%d(%s)", segmentInterval.Num, segmentInterval.Unit)).
 			Str("total_time_range", timeRange.String()).
 			Str("segment_time_range", segTR.String())
