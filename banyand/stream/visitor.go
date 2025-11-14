@@ -97,7 +97,7 @@ func (sv *streamSegmentVisitor) visitShardElementIndex(segmentTR *timestamp.Time
 // VisitStreamsInTimeRange traverses stream segments within the specified time range
 // and calls the visitor methods for series index, parts, and element indexes.
 // This function works directly with the filesystem without requiring a database instance.
-func VisitStreamsInTimeRange(tsdbRootPath string, timeRange timestamp.TimeRange, visitor Visitor, intervalRule storage.IntervalRule, segmentInterval storage.IntervalRule) error {
+func VisitStreamsInTimeRange(tsdbRootPath string, timeRange timestamp.TimeRange, visitor Visitor, segmentInterval storage.IntervalRule) error {
 	adapter := &streamSegmentVisitor{visitor: visitor}
-	return storage.VisitSegmentsInTimeRange(tsdbRootPath, timeRange, adapter, intervalRule, segmentInterval)
+	return storage.VisitSegmentsInTimeRange(tsdbRootPath, timeRange, adapter, segmentInterval)
 }

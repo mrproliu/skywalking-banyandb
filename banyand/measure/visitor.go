@@ -84,7 +84,7 @@ func (mv *measureSegmentVisitor) visitShardParts(segmentTR *timestamp.TimeRange,
 // VisitMeasuresInTimeRange traverses measure segments within the specified time range
 // and calls the visitor methods for parts within shards.
 // This function works directly with the filesystem without requiring a database instance.
-func VisitMeasuresInTimeRange(tsdbRootPath string, timeRange timestamp.TimeRange, visitor Visitor, intervalRule storage.IntervalRule, segmentIntervalRule storage.IntervalRule) error {
+func VisitMeasuresInTimeRange(tsdbRootPath string, timeRange timestamp.TimeRange, visitor Visitor, segmentInterval storage.IntervalRule) error {
 	adapter := &measureSegmentVisitor{visitor: visitor}
-	return storage.VisitSegmentsInTimeRange(tsdbRootPath, timeRange, adapter, intervalRule, segmentIntervalRule)
+	return storage.VisitSegmentsInTimeRange(tsdbRootPath, timeRange, adapter, segmentInterval)
 }

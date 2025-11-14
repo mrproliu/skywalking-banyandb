@@ -42,26 +42,21 @@ type SegmentVisitor interface {
 // VisitSegmentsInTimeRange traverses segments within the specified time range
 // and calls the visitor methods for series index and shard directories.
 // This function works directly with the filesystem without requiring a database instance.
-func VisitSegmentsInTimeRange(tsdbRootPath string, timeRange timestamp.TimeRange, visitor SegmentVisitor, ttl, segmentInterval IntervalRule) error {
+func VisitSegmentsInTimeRange(tsdbRootPath string, timeRange timestamp.TimeRange, visitor SegmentVisitor, segmentInterval IntervalRule) error {
 	// Parse segment directories in the root path
 	var segmentPaths []segmentInfo
 	err := walkDir(tsdbRootPath, segPathPrefix, func(suffix string) error {
-		startTime, err := parseSegmentTime(suffix, ttl.Unit)
+		startTime, err := parseSegmentTime(suffix, segmentInterval.Unit)
 		if err != nil {
 			return err
 		}
 
 		// Calculate end time based on interval rule
-		segmentEndTime := segmentInterval.NextTime(startTime)
-		endTime := ttl.NextTime(startTime)
-		if segmentEndTime.After(endTime) {
-			endTime = segmentEndTime
-		}
+		endTime := segmentInterval.NextTime(startTime)
 		segTR := timestamp.NewSectionTimeRange(startTime, endTime)
 
 		// Check if segment is completely included in the requested time range
 		logEntry := log.Info().Str("segment_suffix", suffix).
-			Str("ttl_rule", fmt.Sprintf("%d(%s)", ttl.Num, ttl.Unit)).
 			Str("segment_interval_rule", fmt.Sprintf("%d(%s)", segmentInterval.Num, segmentInterval.Unit)).
 			Str("total_time_range", timeRange.String()).
 			Str("segment_time_range", segTR.String())

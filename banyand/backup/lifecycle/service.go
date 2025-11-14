@@ -553,21 +553,25 @@ func (l *lifecycleService) getGroupsToProcess(ctx context.Context, progress *Pro
 func (l *lifecycleService) processStreamGroup(ctx context.Context, g *commonv1.Group,
 	streamDir string, nodes []*databasev1.Node, labels map[string]string, progress *Progress,
 ) {
-	tr := l.getRemovalSegmentsTimeRange(g)
+	tr, err := l.getRemovalSegmentsTimeRange(g, nodes, labels)
+	if err != nil {
+		l.l.Error().Err(err).Msgf("failed to get removal segments time range for group %s", g.Metadata.Name)
+		return
+	}
 	if tr.Start.IsZero() && tr.End.IsZero() {
 		l.l.Info().Msgf("no removal segments time range for group %s, skipping stream migration", g.Metadata.Name)
 		progress.MarkGroupCompleted(g.Metadata.Name)
 		return
 	}
 
-	segmentSuffxies, err := l.processStreamGroupFileBased(ctx, g, streamDir, tr, nodes, labels, progress)
+	segmentSuffixes, err := l.processStreamGroupFileBased(ctx, g, streamDir, tr, nodes, labels, progress)
 	if err != nil {
 		l.l.Error().Err(err).Msgf("failed to migrate stream group %s using file-based approach", g.Metadata.Name)
 		return
 	}
 
 	l.l.Info().Msgf("deleting expired stream segments for group: %s, time range: %s", g.Metadata.Name, tr.String())
-	l.deleteExpiredStreamSegments(ctx, g, segmentSuffxies, progress)
+	l.deleteExpiredStreamSegments(ctx, g, segmentSuffixes, progress)
 	progress.MarkGroupCompleted(g.Metadata.Name)
 }
 
@@ -612,17 +616,16 @@ func (l *lifecycleService) processStreamGroupFileBased(_ context.Context, g *com
 
 // getRemovalSegmentsTimeRange calculates the time range for segments that should be migrated
 // based on the group's TTL configuration, similar to storage.segmentController.getExpiredSegmentsTimeRange.
-func (l *lifecycleService) getRemovalSegmentsTimeRange(g *commonv1.Group) *timestamp.TimeRange {
-	if g.ResourceOpts == nil || g.ResourceOpts.Ttl == nil {
-		l.l.Debug().Msgf("no TTL configured for group %s", g.Metadata.Name)
-		return &timestamp.TimeRange{} // Return empty time range
+func (l *lifecycleService) getRemovalSegmentsTimeRange(g *commonv1.Group, nodes []*databasev1.Node, labels map[string]string) (*timestamp.TimeRange, error) {
+	_, _, ttl, _, _, _, err := parseGroup(g, labels, nodes, l.l, l.metadata)
+	if err != nil {
+		return nil, err
 	}
-
 	// Convert TTL to storage.IntervalRule
-	ttl := storage.MustToIntervalRule(g.ResourceOpts.Ttl)
+	ttlRule := storage.MustToIntervalRule(ttl)
 
 	// Calculate deadline based on TTL (same logic as segmentController.getExpiredSegmentsTimeRange)
-	deadline := time.Now().Local().Add(-l.calculateTTLDuration(ttl))
+	deadline := time.Now().Local().Add(-l.calculateTTLDuration(ttlRule))
 
 	// Create time range for segments before the deadline
 	timeRange := &timestamp.TimeRange{
@@ -635,10 +638,10 @@ func (l *lifecycleService) getRemovalSegmentsTimeRange(g *commonv1.Group) *times
 	l.l.Info().
 		Str("group", g.Metadata.Name).
 		Time("deadline", deadline).
-		Str("ttl", fmt.Sprintf("%d %s", g.ResourceOpts.Ttl.Num, g.ResourceOpts.Ttl.Unit.String())).
+		Str("ttl", fmt.Sprintf("%d %s", ttl.Num, ttl.Unit)).
 		Msg("calculated removal segments time range based on TTL")
 
-	return timeRange
+	return timeRange, nil
 }
 
 // calculateTTLDuration calculates the duration for a TTL interval rule.
@@ -681,7 +684,11 @@ func (l *lifecycleService) deleteExpiredStreamSegments(ctx context.Context, g *c
 func (l *lifecycleService) processMeasureGroup(ctx context.Context, g *commonv1.Group, measureDir string,
 	nodes []*databasev1.Node, labels map[string]string, progress *Progress,
 ) {
-	tr := l.getRemovalSegmentsTimeRange(g)
+	tr, err := l.getRemovalSegmentsTimeRange(g, nodes, labels)
+	if err != nil {
+		l.l.Error().Err(err).Msgf("failed to get removal segments time range for group %s", g.Metadata.Name)
+		return
+	}
 	if tr.Start.IsZero() && tr.End.IsZero() {
 		l.l.Info().Msgf("no removal segments time range for group %s, skipping measure migration", g.Metadata.Name)
 		progress.MarkGroupCompleted(g.Metadata.Name)

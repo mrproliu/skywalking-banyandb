@@ -135,7 +135,7 @@ func TestVisitSegmentsInTimeRange(t *testing.T) {
 		visitor := NewTestVisitor()
 		timeRange := timestamp.NewSectionTimeRange(ts, ts.Add(24*time.Hour))
 
-		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL, opts.SegmentInterval)
+		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.SegmentInterval)
 		require.NoError(t, err)
 
 		// Verify series index was visited
@@ -202,7 +202,7 @@ func TestVisitSegmentsInTimeRange(t *testing.T) {
 		visitor := NewTestVisitor()
 		timeRange := timestamp.NewSectionTimeRange(baseDate, baseDate.AddDate(0, 0, 3))
 
-		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL, opts.SegmentInterval)
+		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL)
 		require.NoError(t, err)
 
 		// Verify all series indices were visited
@@ -285,7 +285,7 @@ func TestVisitSegmentsInTimeRange(t *testing.T) {
 		endTime := baseDate.AddDate(0, 0, 4)   // 2024-05-05 (exclusive)
 		timeRange := timestamp.NewSectionTimeRange(startTime, endTime)
 
-		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL, opts.SegmentInterval)
+		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL)
 		require.NoError(t, err)
 
 		// Verify only middle segments were visited (3 segments)
@@ -311,7 +311,7 @@ func TestVisitSegmentsInTimeRange(t *testing.T) {
 		timeRange := timestamp.NewSectionTimeRange(time.Now(), time.Now().Add(24*time.Hour))
 		intervalRule := IntervalRule{Unit: DAY, Num: 1}
 
-		err := VisitSegmentsInTimeRange(dir, timeRange, visitor, intervalRule, intervalRule)
+		err := VisitSegmentsInTimeRange(dir, timeRange, visitor, intervalRule)
 		require.NoError(t, err)
 
 		// Verify nothing was visited
@@ -363,7 +363,7 @@ func TestVisitSegmentsInTimeRange(t *testing.T) {
 
 		timeRange := timestamp.NewSectionTimeRange(ts, ts.Add(24*time.Hour))
 
-		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL, opts.SegmentInterval)
+		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "series access error")
 		require.Contains(t, err.Error(), "failed to visit series index for segment")
@@ -414,7 +414,7 @@ func TestVisitSegmentsInTimeRange(t *testing.T) {
 
 		timeRange := timestamp.NewSectionTimeRange(ts, ts.Add(24*time.Hour))
 
-		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL, opts.SegmentInterval)
+		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "shard access error")
 		require.Contains(t, err.Error(), "failed to visit shards for segment")
@@ -470,7 +470,7 @@ func TestVisitSegmentsInTimeRange(t *testing.T) {
 		visitor := NewTestVisitor()
 		timeRange := timestamp.NewSectionTimeRange(baseTime, baseTime.Add(3*time.Hour))
 
-		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL, opts.SegmentInterval)
+		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL)
 		require.NoError(t, err)
 
 		// Verify all series indices were visited
@@ -540,7 +540,7 @@ func TestVisitSegmentsInTimeRange(t *testing.T) {
 		tsPlus1Min, err := time.ParseInLocation("2006-01-02 15:04:05", "2025-11-01 00:01:00", time.Local)
 		require.NoError(t, err)
 		timeRange := timestamp.NewSectionTimeRange(time.Time{}, tsPlus1Min)
-		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL, opts.SegmentInterval)
+		err = VisitSegmentsInTimeRange(dir, timeRange, visitor, opts.TTL)
 		require.NoError(t, err)
 		require.Len(t, visitor.visitedSeries, 1)
 		// Should only oct 31 be including
