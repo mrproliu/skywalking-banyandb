@@ -34,7 +34,7 @@ var log = logger.GetLogger("storage", "visitor")
 // SegmentVisitor defines the interface for visiting segment components.
 type SegmentVisitor interface {
 	// VisitSeries visits the series index directory for a segment.
-	VisitSeries(segmentTR *timestamp.TimeRange, seriesIndexPath string, shardIDs []common.ShardID) error
+	VisitSeries(segmentTR *timestamp.TimeRange, segmentSuffix, seriesIndexPath string, shardIDs []common.ShardID) error
 	// VisitShard visits a shard directory within a segment.
 	VisitShard(segmentTR *timestamp.TimeRange, shardID common.ShardID, shardPath string) error
 }
@@ -93,7 +93,7 @@ func VisitSegmentsInTimeRange(tsdbRootPath string, timeRange timestamp.TimeRange
 
 		// Visit series index directory
 		seriesIndexPath := filepath.Join(segInfo.path, seriesIndexDirName)
-		if err := visitor.VisitSeries(&segInfo.timeRange, seriesIndexPath, shardIDs); err != nil {
+		if err := visitor.VisitSeries(&segInfo.timeRange, segInfo.suffix, seriesIndexPath, shardIDs); err != nil {
 			return errors.Wrapf(err, "failed to visit series index for segment (suffix: %s, path: %s, timeRange: %v)", segInfo.suffix, segInfo.path, segInfo.timeRange)
 		}
 

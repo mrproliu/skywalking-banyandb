@@ -30,7 +30,7 @@ import (
 // Visitor defines the interface for visiting measure components.
 type Visitor interface {
 	// VisitSeries visits the series index directory for a segment.
-	VisitSeries(segmentTR *timestamp.TimeRange, seriesIndexPath string, shardIDs []common.ShardID) error
+	VisitSeries(segmentTR *timestamp.TimeRange, segmentSuffix, seriesIndexPath string, shardIDs []common.ShardID) error
 	// VisitPart visits a part directory within a shard.
 	VisitPart(segmentTR *timestamp.TimeRange, shardID common.ShardID, partPath string) error
 }
@@ -41,8 +41,8 @@ type measureSegmentVisitor struct {
 }
 
 // VisitSeries implements Visitor.
-func (mv *measureSegmentVisitor) VisitSeries(segmentTR *timestamp.TimeRange, seriesIndexPath string, shardIDs []common.ShardID) error {
-	return mv.visitor.VisitSeries(segmentTR, seriesIndexPath, shardIDs)
+func (mv *measureSegmentVisitor) VisitSeries(segmentTR *timestamp.TimeRange, segmentSuffix, seriesIndexPath string, shardIDs []common.ShardID) error {
+	return mv.visitor.VisitSeries(segmentTR, segmentSuffix, seriesIndexPath, shardIDs)
 }
 
 // VisitShard implements storage.SegmentVisitor.

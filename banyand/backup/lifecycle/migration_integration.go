@@ -40,11 +40,11 @@ func migrateStreamWithFileBasedAndProgress(
 	logger *logger.Logger,
 	progress *Progress,
 	chunkSize int,
-) error {
+) ([]string, error) {
 	// Use parseGroup function to get sharding parameters and TTL
 	shardNum, replicas, ttl, segmentInterval, selector, client, err := parseGroup(group, nodeLabels, nodes, logger, metadata)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer client.GracefulStop()
 
@@ -73,7 +73,11 @@ func migrateStreamWithFileBasedAndProgress(
 	}
 
 	// Use the existing VisitStreamsInTimeRange function with our file-based visitor
-	return stream.VisitStreamsInTimeRange(tsdbRootPath, timeRange, visitor, intervalRule, segmentIntervalRule)
+	err = stream.VisitStreamsInTimeRange(tsdbRootPath, timeRange, visitor, intervalRule, segmentIntervalRule)
+	if err != nil {
+		return nil, err
+	}
+	return visitor.getSegmentSuffixes(), err
 }
 
 // countStreamParts counts the total number of parts in the given time range.
@@ -96,7 +100,7 @@ type partCountVisitor struct {
 }
 
 // VisitSeries implements stream.Visitor.
-func (pcv *partCountVisitor) VisitSeries(_ *timestamp.TimeRange, _ string, _ []common.ShardID) error {
+func (pcv *partCountVisitor) VisitSeries(_ *timestamp.TimeRange, _, _ string, _ []common.ShardID) error {
 	return nil
 }
 
@@ -122,11 +126,11 @@ func migrateMeasureWithFileBasedAndProgress(
 	logger *logger.Logger,
 	progress *Progress,
 	chunkSize int,
-) error {
+) ([]string, error) {
 	// Use parseGroup function to get sharding parameters and TTL
 	shardNum, replicas, ttl, segmentInterval, selector, client, err := parseGroup(group, nodeLabels, nodes, logger, metadata)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer client.GracefulStop()
 
@@ -155,7 +159,11 @@ func migrateMeasureWithFileBasedAndProgress(
 	}
 
 	// Use the existing VisitMeasuresInTimeRange function with our file-based visitor
-	return measure.VisitMeasuresInTimeRange(tsdbRootPath, timeRange, visitor, intervalRule, segmentIntervalRule)
+	err = measure.VisitMeasuresInTimeRange(tsdbRootPath, timeRange, visitor, intervalRule, segmentIntervalRule)
+	if err != nil {
+		return nil, err
+	}
+	return visitor.getSegments(), err
 }
 
 // countMeasureParts counts the total number of parts in the given time range.
@@ -178,7 +186,7 @@ type measurePartCountVisitor struct {
 }
 
 // VisitSeries implements measure.Visitor.
-func (pcv *measurePartCountVisitor) VisitSeries(_ *timestamp.TimeRange, _ string, _ []common.ShardID) error {
+func (pcv *measurePartCountVisitor) VisitSeries(_ *timestamp.TimeRange, _, _ string, _ []common.ShardID) error {
 	return nil
 }
 

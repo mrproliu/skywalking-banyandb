@@ -30,13 +30,11 @@ import (
 	"github.com/benbjohnson/clock"
 	"github.com/robfig/cron/v3"
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/apache/skywalking-banyandb/api/common"
 	commonv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/common/v1"
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
 	measurev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/measure/v1"
-	modelv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/model/v1"
 	streamv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/stream/v1"
 	"github.com/apache/skywalking-banyandb/banyand/backup/snapshot"
 	"github.com/apache/skywalking-banyandb/banyand/internal/storage"
@@ -562,24 +560,24 @@ func (l *lifecycleService) processStreamGroup(ctx context.Context, g *commonv1.G
 		return
 	}
 
-	err := l.processStreamGroupFileBased(ctx, g, streamDir, tr, nodes, labels, progress)
+	segmentSuffxies, err := l.processStreamGroupFileBased(ctx, g, streamDir, tr, nodes, labels, progress)
 	if err != nil {
 		l.l.Error().Err(err).Msgf("failed to migrate stream group %s using file-based approach", g.Metadata.Name)
 		return
 	}
 
 	l.l.Info().Msgf("deleting expired stream segments for group: %s, time range: %s", g.Metadata.Name, tr.String())
-	l.deleteExpiredStreamSegments(ctx, g, tr, progress)
+	l.deleteExpiredStreamSegments(ctx, g, segmentSuffxies, progress)
 	progress.MarkGroupCompleted(g.Metadata.Name)
 }
 
 // processStreamGroupFileBased uses file-based migration instead of element-based queries.
 func (l *lifecycleService) processStreamGroupFileBased(_ context.Context, g *commonv1.Group,
 	streamDir string, tr *timestamp.TimeRange, nodes []*databasev1.Node, labels map[string]string, progress *Progress,
-) error {
+) ([]string, error) {
 	if progress.IsStreamGroupDeleted(g.Metadata.Name) {
 		l.l.Info().Msgf("skipping already completed file-based migration for group: %s", g.Metadata.Name)
-		return nil
+		return nil, nil
 	}
 
 	l.l.Info().Msgf("starting file-based stream migration for group: %s, time range: %s", g.Metadata.Name, tr.String())
@@ -589,11 +587,11 @@ func (l *lifecycleService) processStreamGroupFileBased(_ context.Context, g *com
 	// may no data found in the snapshot
 	if _, err := os.Stat(rootDir); err != nil && errors.Is(err, os.ErrNotExist) {
 		l.l.Info().Msgf("skipping file-based stream migration for group because is empty in the snapshot dir: %s", g.Metadata.Name)
-		return nil
+		return nil, nil
 	}
 
 	// Use the file-based migration with existing visitor pattern
-	err := migrateStreamWithFileBasedAndProgress(
+	segmentSuffixes, err := migrateStreamWithFileBasedAndProgress(
 		rootDir,          // Use snapshot directory as source
 		*tr,              // Time range for segments to migrate
 		g,                // Group configuration
@@ -605,11 +603,11 @@ func (l *lifecycleService) processStreamGroupFileBased(_ context.Context, g *com
 		int(l.chunkSize), // Chunk size for streaming
 	)
 	if err != nil {
-		return fmt.Errorf("file-based stream migration failed: %w", err)
+		return nil, fmt.Errorf("file-based stream migration failed: %w", err)
 	}
 
 	l.l.Info().Msgf("completed file-based stream migration for group: %s", g.Metadata.Name)
-	return nil
+	return segmentSuffixes, nil
 }
 
 // getRemovalSegmentsTimeRange calculates the time range for segments that should be migrated
@@ -657,7 +655,7 @@ func (l *lifecycleService) calculateTTLDuration(ttl storage.IntervalRule) time.D
 	}
 }
 
-func (l *lifecycleService) deleteExpiredStreamSegments(ctx context.Context, g *commonv1.Group, tr *timestamp.TimeRange, progress *Progress) {
+func (l *lifecycleService) deleteExpiredStreamSegments(ctx context.Context, g *commonv1.Group, segmentSuffixes []string, progress *Progress) {
 	if progress.IsStreamGroupDeleted(g.Metadata.Name) {
 		l.l.Info().Msgf("skipping already deleted stream group segments: %s", g.Metadata.Name)
 		return
@@ -666,19 +664,16 @@ func (l *lifecycleService) deleteExpiredStreamSegments(ctx context.Context, g *c
 	resp, err := snapshot.Conn(l.gRPCAddr, l.enableTLS, l.insecure, l.cert, func(conn *grpc.ClientConn) (*streamv1.DeleteExpiredSegmentsResponse, error) {
 		client := streamv1.NewStreamServiceClient(conn)
 		return client.DeleteExpiredSegments(ctx, &streamv1.DeleteExpiredSegmentsRequest{
-			Group: g.Metadata.Name,
-			TimeRange: &modelv1.TimeRange{
-				Begin: timestamppb.New(tr.Start),
-				End:   timestamppb.New(tr.End),
-			},
+			Group:           g.Metadata.Name,
+			SegmentSuffixes: segmentSuffixes,
 		})
 	})
 	if err != nil {
-		l.l.Error().Err(err).Msgf("failed to delete expired segments in group %s", g.Metadata.Name)
+		l.l.Error().Err(err).Msgf("failed to delete expired segments in group %s, segments: %s", g.Metadata.Name, segmentSuffixes)
 		return
 	}
 
-	l.l.Info().Msgf("deleted %d expired segments in group %s", resp.Deleted, g.Metadata.Name)
+	l.l.Info().Msgf("deleted %d expired segments in group %s, segments: %s", resp.Deleted, g.Metadata.Name, segmentSuffixes)
 	progress.MarkStreamGroupDeleted(g.Metadata.Name)
 	progress.Save(l.progressFilePath, l.l)
 }
@@ -695,13 +690,14 @@ func (l *lifecycleService) processMeasureGroup(ctx context.Context, g *commonv1.
 	}
 
 	// Try file-based migration first
-	if err := l.processMeasureGroupFileBased(ctx, g, measureDir, tr, nodes, labels, progress); err != nil {
+	segmentSuffixes, err := l.processMeasureGroupFileBased(ctx, g, measureDir, tr, nodes, labels, progress)
+	if err != nil {
 		l.l.Error().Err(err).Msgf("failed to migrate measure group %s using file-based approach", g.Metadata.Name)
 		return
 	}
 
 	l.l.Info().Msgf("deleting expired measure segments for group: %s", g.Metadata.Name)
-	l.deleteExpiredMeasureSegments(ctx, g, tr, progress)
+	l.deleteExpiredMeasureSegments(ctx, g, segmentSuffixes, progress)
 	progress.MarkGroupCompleted(g.Metadata.Name)
 	progress.Save(l.progressFilePath, l.l)
 }
@@ -709,10 +705,10 @@ func (l *lifecycleService) processMeasureGroup(ctx context.Context, g *commonv1.
 // processMeasureGroupFileBased uses file-based migration instead of query-based migration.
 func (l *lifecycleService) processMeasureGroupFileBased(_ context.Context, g *commonv1.Group,
 	measureDir string, tr *timestamp.TimeRange, nodes []*databasev1.Node, labels map[string]string, progress *Progress,
-) error {
+) ([]string, error) {
 	if progress.IsMeasureGroupDeleted(g.Metadata.Name) {
 		l.l.Info().Msgf("skipping already completed file-based measure migration for group: %s", g.Metadata.Name)
-		return nil
+		return nil, nil
 	}
 
 	l.l.Info().Msgf("starting file-based measure migration for group: %s", g.Metadata.Name)
@@ -722,11 +718,11 @@ func (l *lifecycleService) processMeasureGroupFileBased(_ context.Context, g *co
 	// may no data found in the snapshot
 	if _, err := os.Stat(rootDir); err != nil && errors.Is(err, os.ErrNotExist) {
 		l.l.Info().Msgf("skipping file-based measure migration for group because is empty in the snapshot dir: %s", g.Metadata.Name)
-		return nil
+		return nil, nil
 	}
 
 	// Use the file-based migration with existing visitor pattern
-	err := migrateMeasureWithFileBasedAndProgress(
+	segmentSuffixes, err := migrateMeasureWithFileBasedAndProgress(
 		rootDir,          // Use snapshot directory as source
 		*tr,              // Time range for segments to migrate
 		g,                // Group configuration
@@ -738,14 +734,14 @@ func (l *lifecycleService) processMeasureGroupFileBased(_ context.Context, g *co
 		int(l.chunkSize), // Chunk size for streaming
 	)
 	if err != nil {
-		return fmt.Errorf("file-based measure migration failed: %w", err)
+		return nil, fmt.Errorf("file-based measure migration failed: %w", err)
 	}
 
 	l.l.Info().Msgf("completed file-based measure migration for group: %s", g.Metadata.Name)
-	return nil
+	return segmentSuffixes, nil
 }
 
-func (l *lifecycleService) deleteExpiredMeasureSegments(ctx context.Context, g *commonv1.Group, tr *timestamp.TimeRange, progress *Progress) {
+func (l *lifecycleService) deleteExpiredMeasureSegments(ctx context.Context, g *commonv1.Group, segmentSuffixes []string, progress *Progress) {
 	if progress.IsMeasureGroupDeleted(g.Metadata.Name) {
 		l.l.Info().Msgf("skipping already deleted measure group segments: %s", g.Metadata.Name)
 		return
@@ -754,19 +750,16 @@ func (l *lifecycleService) deleteExpiredMeasureSegments(ctx context.Context, g *
 	resp, err := snapshot.Conn(l.gRPCAddr, l.enableTLS, l.insecure, l.cert, func(conn *grpc.ClientConn) (*measurev1.DeleteExpiredSegmentsResponse, error) {
 		client := measurev1.NewMeasureServiceClient(conn)
 		return client.DeleteExpiredSegments(ctx, &measurev1.DeleteExpiredSegmentsRequest{
-			Group: g.Metadata.Name,
-			TimeRange: &modelv1.TimeRange{
-				Begin: timestamppb.New(tr.Start),
-				End:   timestamppb.New(tr.End),
-			},
+			Group:           g.Metadata.Name,
+			SegmentSuffixes: segmentSuffixes,
 		})
 	})
 	if err != nil {
-		l.l.Error().Err(err).Msgf("failed to delete expired segments in group %s", g.Metadata.Name)
+		l.l.Error().Err(err).Msgf("failed to delete expired segments in group %s, suffixes: %s", g.Metadata.Name, segmentSuffixes)
 		return
 	}
 
-	l.l.Info().Msgf("deleted %d expired segments in group %s", resp.Deleted, g.Metadata.Name)
+	l.l.Info().Msgf("deleted %d expired segments in group %s, suffixes: %s", resp.Deleted, g.Metadata.Name, segmentSuffixes)
 	progress.MarkMeasureGroupDeleted(g.Metadata.Name)
 	progress.Save(l.progressFilePath, l.l)
 }
