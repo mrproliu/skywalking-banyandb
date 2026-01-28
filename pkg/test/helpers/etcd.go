@@ -22,10 +22,10 @@ import (
 	"log"
 	"time"
 
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
-	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 )
 
 var defaultDialTimeout = 5 * time.Second

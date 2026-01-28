@@ -58,6 +58,7 @@ var _ = ginkgo.Describe("Lifecycle", func() {
 			"--etcd-endpoints", SharedContext.EtcdAddr,
 			"--progress-file", pf,
 			"--report-dir", rf,
+			"--schedule", "@every 5s",
 		})
 		err = lifecycleCmd.Execute()
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())

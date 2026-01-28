@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package schema_test
+package etcd_test
 
 import (
 	"context"
@@ -23,6 +23,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema/etcd"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gleak"
@@ -72,9 +73,9 @@ var _ = ginkgo.Describe("etcd_register", func() {
 		)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		<-server.ReadyNotify()
-		r, err = schema.NewEtcdSchemaRegistry(
-			schema.Namespace("test"),
-			schema.ConfigureServerEndpoints(endpoints),
+		r, err = etcd.NewEtcdSchemaRegistry(
+			etcd.Namespace("test"),
+			etcd.ConfigureServerEndpoints(endpoints),
 		)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	})
@@ -90,9 +91,9 @@ var _ = ginkgo.Describe("etcd_register", func() {
 		_, err := r.GetNode(context.Background(), node)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Expect(r.Close()).ShouldNot(gomega.HaveOccurred())
-		r, err = schema.NewEtcdSchemaRegistry(
-			schema.Namespace("test"),
-			schema.ConfigureServerEndpoints(endpoints))
+		r, err = etcd.NewEtcdSchemaRegistry(
+			etcd.Namespace("test"),
+			etcd.ConfigureServerEndpoints(endpoints))
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		_, err = r.GetNode(context.Background(), node)
 		gomega.Expect(err).Should(gomega.MatchError(schema.ErrGRPCResourceNotFound))

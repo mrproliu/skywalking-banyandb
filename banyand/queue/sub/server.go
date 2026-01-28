@@ -78,29 +78,32 @@ type server struct {
 	databasev1.UnimplementedNodeQueryServiceServer
 	databasev1.UnimplementedClusterStateServiceServer
 	clusterv1.UnimplementedServiceServer
-	omr                   observability.MetricsRegistry
-	creds                 credentials.TransportCredentials
-	curNode               *databasev1.Node
-	metrics               *metrics
-	ser                   *grpclib.Server
-	listeners             map[bus.Topic][]bus.MessageListener
-	topicMap              map[string]bus.Topic
-	chunkedSyncHandlers   map[bus.Topic]queue.ChunkedSyncHandler
-	log                   *logger.Logger
-	httpSrv               *http.Server
-	tlsReloader           *pkgtls.Reloader
-	clientCloser          context.CancelFunc
-	routeTableProvider    map[string]route.TableProvider
-	certFile              string
-	addr                  string
-	keyFile               string
-	flagNamePrefix        string
-	httpAddr              string
-	host                  string
-	chunkBufferTimeout    time.Duration
-	maxRecvMsgSize        run.Bytes
-	listenersLock         sync.RWMutex
-	routeTableProviderMu  sync.RWMutex
+	omr                    observability.MetricsRegistry
+	creds                  credentials.TransportCredentials
+	curNode                *databasev1.Node
+	metrics                *metrics
+	ser                    *grpclib.Server
+	listeners              map[bus.Topic][]bus.MessageListener
+	topicMap               map[string]bus.Topic
+	chunkedSyncHandlers    map[bus.Topic]queue.ChunkedSyncHandler
+	log                    *logger.Logger
+	httpSrv                *http.Server
+	tlsReloader            *pkgtls.Reloader
+	clientCloser           context.CancelFunc
+	routeTableProvider     map[string]route.TableProvider
+	certFile               string
+	addr                   string
+	keyFile                string
+	flagNamePrefix         string
+	httpAddr               string
+	host                   string
+	chunkBufferTimeout     time.Duration
+	maxRecvMsgSize         run.Bytes
+	listenersLock          sync.RWMutex
+	routeTableProviderMu   sync.RWMutex
+	metadataPropertyServer interface {
+		RegisterGRPCServices(grpcServer *grpclib.Server)
+	}
 	port                  uint32
 	httpPort              uint32
 	maxChunkBufferSize    uint32
@@ -292,6 +295,11 @@ func (s *server) Serve() run.StopNotify {
 	measurev1.RegisterMeasureServiceServer(s.ser, &measureService{ser: s})
 	tracev1.RegisterTraceServiceServer(s.ser, &traceService{ser: s})
 
+	// Register metadata property services if property server is set
+	if s.metadataPropertyServer != nil {
+		s.metadataPropertyServer.RegisterGRPCServices(s.ser)
+	}
+
 	var ctx context.Context
 	ctx, s.clientCloser = context.WithCancel(context.Background())
 	clientOpts := make([]grpclib.DialOption, 0, 1)
@@ -395,6 +403,13 @@ func (s *server) SetRouteProviders(providers map[string]route.TableProvider) {
 	s.routeTableProviderMu.Lock()
 	s.routeTableProvider = providers
 	s.routeTableProviderMu.Unlock()
+}
+
+// SetMetadataPropertyServer sets the metadata property server for gRPC service registration.
+func (s *server) SetMetadataPropertyServer(propertyServer interface {
+	RegisterGRPCServices(grpcServer *grpclib.Server)
+}) {
+	s.metadataPropertyServer = propertyServer
 }
 
 type metrics struct {

@@ -21,11 +21,18 @@ import (
 	"context"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protojson"
+
+	"github.com/apache/skywalking-banyandb/api/common"
 	commonv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/common/v1"
+	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
 	modelv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/model/v1"
 	propertyv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/property/v1"
 	"github.com/apache/skywalking-banyandb/banyand/observability"
+	"github.com/apache/skywalking-banyandb/banyand/property/gossip"
 	"github.com/apache/skywalking-banyandb/pkg/fs"
+	"github.com/apache/skywalking-banyandb/pkg/logger"
+	"github.com/apache/skywalking-banyandb/pkg/run"
 )
 
 // CreateTestShardForDump creates a test property shard for testing the dump tool.
@@ -172,4 +179,135 @@ func CreateTestShardForDump(tmpPath string, fileSystem fs.FileSystem) (string, f
 	}
 
 	return shardPath, cleanup
+}
+
+// testService is a Service implementation for testing that implements the full property.Service interface.
+type testService struct {
+	db    *database
+	l     *logger.Logger
+	close chan struct{}
+}
+
+// Ensure testService implements Service interface.
+var _ Service = (*testService)(nil)
+
+// NewTestService creates a Service for testing purposes.
+// It returns the Service, a close function, and any error encountered.
+func NewTestService(dataDir, snapshotDir string, omr observability.MetricsRegistry, fileSystem fs.FileSystem) (Service, func() error, error) {
+	db, dbErr := openDB(context.Background(), dataDir, 3*time.Second, time.Hour, 32, omr, fileSystem,
+		false, snapshotDir, "@every 10m", time.Second*10, "* 2 * * *", nil, nil, nil)
+	if dbErr != nil {
+		return nil, nil, dbErr
+	}
+	l := logger.GetLogger("property-test")
+	return &testService{db: db, l: l, close: make(chan struct{})}, db.close, nil
+}
+
+func (s *testService) GetGossIPMessenger() gossip.Messenger {
+	return nil
+}
+
+// PreRun implements run.PreRunner.
+func (s *testService) PreRun(_ context.Context) error {
+	return nil
+}
+
+// FlagSet implements run.Config.
+func (s *testService) FlagSet() *run.FlagSet {
+	return run.NewFlagSet("property-test")
+}
+
+// Validate implements run.Config.
+func (s *testService) Validate() error {
+	return nil
+}
+
+// Name implements run.Service.
+func (s *testService) Name() string {
+	return "property-test"
+}
+
+// Role implements run.Service.
+func (s *testService) Role() databasev1.Role {
+	return databasev1.Role_ROLE_DATA
+}
+
+// Serve implements run.Service.
+func (s *testService) Serve() run.StopNotify {
+	return s.close
+}
+
+// GracefulStop implements run.Service.
+func (s *testService) GracefulStop() {
+	select {
+	case <-s.close:
+	default:
+		close(s.close)
+	}
+}
+
+// GetRouteTable implements route.TableProvider.
+func (s *testService) GetRouteTable() *databasev1.RouteTable {
+	return nil
+}
+
+// GetGossIPGrpcPort implements Service.
+func (s *testService) GetGossIPGrpcPort() *uint32 {
+	return nil
+}
+
+// DirectUpdate implements DirectService.DirectUpdate.
+func (s *testService) DirectUpdate(ctx context.Context, group string, shardID uint32, id []byte, prop *propertyv1.Property) error {
+	return s.db.update(ctx, common.ShardID(shardID), id, prop)
+}
+
+// DirectDelete implements DirectService.DirectDelete.
+func (s *testService) DirectDelete(ctx context.Context, ids [][]byte) error {
+	return s.db.delete(ctx, ids)
+}
+
+// DirectQuery implements DirectService.DirectQuery.
+func (s *testService) DirectQuery(ctx context.Context, req *propertyv1.QueryRequest) ([]*PropertyWithDeleteTime, error) {
+	results, queryErr := s.db.query(ctx, req)
+	if queryErr != nil {
+		return nil, queryErr
+	}
+	props := make([]*PropertyWithDeleteTime, 0, len(results))
+	for _, r := range results {
+		prop := &propertyv1.Property{}
+		if unmarshalErr := protojson.Unmarshal(r.source, prop); unmarshalErr != nil {
+			s.l.Warn().Err(unmarshalErr).Msg("failed to unmarshal property")
+			continue
+		}
+		props = append(props, &PropertyWithDeleteTime{
+			Property:   prop,
+			DeleteTime: r.deleteTime,
+		})
+	}
+	return props, nil
+}
+
+// DirectGet implements DirectService.DirectGet.
+func (s *testService) DirectGet(ctx context.Context, group, name, id string) (*propertyv1.Property, error) {
+	req := &propertyv1.QueryRequest{
+		Groups: []string{group},
+		Name:   name,
+		Ids:    []string{id},
+		Limit:  1,
+	}
+	results, queryErr := s.DirectQuery(ctx, req)
+	if queryErr != nil {
+		return nil, queryErr
+	}
+	for _, r := range results {
+		if r.DeleteTime == 0 {
+			return r.Property, nil
+		}
+	}
+	return nil, nil
+}
+
+// DirectRepair implements DirectService.DirectRepair.
+func (s *testService) DirectRepair(ctx context.Context, shardID uint64, id []byte, prop *propertyv1.Property, deleteTime int64) error {
+	return s.db.repair(ctx, id, shardID, prop, deleteTime)
 }

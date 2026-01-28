@@ -127,6 +127,8 @@ func (p *pub) OnAddOrUpdate(md schema.Metadata) {
 		p.log.Warn().Msg("failed to cast node spec")
 		return
 	}
+	p.log.Info().Str("node", node.String()).Str("allow", fmt.Sprintf("%v", p.allowedRoles)).
+		Msg("node add or update event received")
 	var okRole bool
 	for _, r := range node.Roles {
 		for _, allowed := range p.allowedRoles {
@@ -140,8 +142,12 @@ func (p *pub) OnAddOrUpdate(md schema.Metadata) {
 		}
 	}
 	if !okRole {
+		p.log.Info().Str("node", node.String()).Str("allowed", fmt.Sprintf("%v", p.allowedRoles)).
+			Msg("node role is not allowed, skip it")
 		return
 	}
+	p.log.Info().Str("node", node.String()).Str("allow", fmt.Sprintf("%v", p.allowedRoles)).
+		Msg("node role is allowed, process it")
 
 	address := node.GrpcAddress
 	if address == "" {

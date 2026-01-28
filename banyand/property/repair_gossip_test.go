@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema/etcd"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"go.uber.org/mock/gomock"
@@ -361,7 +362,7 @@ func startEachNode(ctrl *gomock.Controller, node node, groups []group) *nodeCont
 	repairLocation, repairLocationDefer, err := test.NewSpace()
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	result.appendStop(repairLocationDefer)
-	mockGroup := schema.NewMockGroup(ctrl)
+	mockGroup := etcd.NewMockGroup(ctrl)
 	groupDefines := make([]*commonv1.Group, 0, len(groups))
 	for _, g := range groups {
 		groupDefines = append(groupDefines, &commonv1.Group{
