@@ -166,10 +166,6 @@ func (s *clientService) FlagSet() *run.FlagSet {
 		"Maximum retry interval for failed node metadata fetches in file discovery mode")
 	fs.Float64Var(&s.fileRetryMultiplier, "node-discovery-file-retry-multiplier", 2.0,
 		"Backoff multiplier for retry intervals in file discovery mode")
-	fs.BoolVar(&s.dnsTLSEnabled, "node-discovery-dns-tls", false,
-		"Enable TLS for DNS discovery gRPC connections")
-	fs.StringSliceVar(&s.dnsCACertPaths, "node-discovery-dns-ca-certs", []string{},
-		"Comma-separated list of CA certificate files to verify DNS discovered nodes (one per SRV address, in same order)")
 
 	// schema management configuration
 	fs.StringVar(&s.metadataRegistryMode, "metadata-registry-mode", "etcd",

@@ -78,7 +78,6 @@ service SchemaManagementService {
   rpc InsertSchema(InsertSchemaRequest) returns (InsertSchemaResponse);
   rpc UpdateSchema(UpdateSchemaRequest) returns (UpdateSchemaResponse);
   rpc ListSchemas(ListSchemasRequest) returns (ListSchemasResponse);
-  rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
   rpc DeleteSchema(DeleteSchemaRequest) returns (DeleteSchemaResponse);
   rpc RepairSchema(RepairSchemaRequest) returns (RepairSchemaResponse);
 }
@@ -88,7 +87,7 @@ message AggregateSchemaUpdatesRequest {
 }
 
 message AggregateSchemaUpdatesResponse {
-  // which names has updates
+  // which names/schemas has updates
   repeated string names = 1;
 }
 

@@ -100,7 +100,6 @@ type service struct {
 
 // NewMessenger creates a new instance of Messenger for gossip propagation communication between nodes.
 func NewMessenger(omr observability.MetricsRegistry, metadata metadata.Repo, pipeline queue.Client) Messenger {
-	fmt.Println("init messager with metadata", metadata)
 	return &service{
 		metadata:         metadata,
 		omr:              omr,

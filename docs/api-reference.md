@@ -5584,7 +5584,6 @@ WriteResponse is the response contract for write
 | InsertSchema | [InsertSchemaRequest](#banyandb-schema-v1-InsertSchemaRequest) | [InsertSchemaResponse](#banyandb-schema-v1-InsertSchemaResponse) |  |
 | UpdateSchema | [UpdateSchemaRequest](#banyandb-schema-v1-UpdateSchemaRequest) | [UpdateSchemaResponse](#banyandb-schema-v1-UpdateSchemaResponse) |  |
 | ListSchemas | [ListSchemasRequest](#banyandb-schema-v1-ListSchemasRequest) | [ListSchemasResponse](#banyandb-schema-v1-ListSchemasResponse) |  |
-| GetSchema | [GetSchemaRequest](#banyandb-schema-v1-GetSchemaRequest) | [GetSchemaResponse](#banyandb-schema-v1-GetSchemaResponse) |  |
 | DeleteSchema | [DeleteSchemaRequest](#banyandb-schema-v1-DeleteSchemaRequest) | [DeleteSchemaResponse](#banyandb-schema-v1-DeleteSchemaResponse) |  |
 | RepairSchema | [RepairSchemaRequest](#banyandb-schema-v1-RepairSchemaRequest) | [RepairSchemaResponse](#banyandb-schema-v1-RepairSchemaResponse) |  |
 

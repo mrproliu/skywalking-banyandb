@@ -23,13 +23,13 @@ import (
 	"fmt"
 	"testing"
 
-	metadatclient "github.com/apache/skywalking-banyandb/banyand/metadata/client"
-	"github.com/apache/skywalking-banyandb/banyand/metadata/schema/etcd"
 	g "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gleak"
 
+	metadatclient "github.com/apache/skywalking-banyandb/banyand/metadata/client"
 	"github.com/apache/skywalking-banyandb/banyand/metadata/embeddedetcd"
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema/etcd"
 	"github.com/apache/skywalking-banyandb/pkg/logger"
 	"github.com/apache/skywalking-banyandb/pkg/test"
 	"github.com/apache/skywalking-banyandb/pkg/test/flags"
