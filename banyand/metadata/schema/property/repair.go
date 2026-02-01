@@ -20,26 +20,47 @@ package property
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/robfig/cron/v3"
 
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
 	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
+	"github.com/apache/skywalking-banyandb/banyand/observability"
 	"github.com/apache/skywalking-banyandb/pkg/logger"
+	"github.com/apache/skywalking-banyandb/pkg/meter"
 )
+
+type metadataRepairMetrics struct {
+	totalRepairStarted  meter.Counter
+	totalRepairFinished meter.Counter
+	totalRepairErr      meter.Counter
+	totalRepairLatency  meter.Counter
+	totalRepairNodes    meter.Counter
+}
+
+func newMetadataRepairMetrics(factory observability.Factory) *metadataRepairMetrics {
+	return &metadataRepairMetrics{
+		totalRepairStarted:  factory.NewCounter("property_repair_started"),
+		totalRepairFinished: factory.NewCounter("property_repair_finished"),
+		totalRepairErr:      factory.NewCounter("property_repair_err"),
+		totalRepairLatency:  factory.NewCounter("property_repair_latency"),
+		totalRepairNodes:    factory.NewCounter("property_repair_nodes"),
+	}
+}
 
 type repairScheduler struct {
 	server    *Server
 	cron      *cron.Cron
 	l         *logger.Logger
-	enabled   bool
-	cronExpr  string
-	mu        sync.Mutex
+	metrics   *metadataRepairMetrics
 	nodes     map[string]bool
+	cronExpr  string
 	nodesLock sync.RWMutex
+	mu        sync.Mutex
 }
 
-func newRepairScheduler(server *Server, cronExpr string, enabled bool, l *logger.Logger) (*repairScheduler, error) {
+func newRepairScheduler(server *Server, cronExpr string, l *logger.Logger, factory observability.Factory) (*repairScheduler, error) {
 	if _, cronErr := cron.ParseStandard(cronExpr); cronErr != nil {
 		return nil, fmt.Errorf("invalid cron expression: %w", cronErr)
 	}
@@ -47,19 +68,14 @@ func newRepairScheduler(server *Server, cronExpr string, enabled bool, l *logger
 		server:   server,
 		cron:     cron.New(),
 		cronExpr: cronExpr,
-		enabled:  enabled,
 		l:        l,
+		metrics:  newMetadataRepairMetrics(factory),
 		nodes:    make(map[string]bool),
 	}, nil
 }
 
 // Start starts the repair scheduler.
 func (r *repairScheduler) Start() error {
-	if !r.enabled {
-		r.l.Info().Msg("repair mechanism is disabled")
-		return nil
-	}
-
 	_, cronErr := r.cron.AddFunc(r.cronExpr, func() {
 		r.performRepair()
 	})
@@ -82,16 +98,25 @@ func (r *repairScheduler) performRepair() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.l.Info().Msg("starting repair property schema cycle")
+	r.metrics.totalRepairStarted.Inc(1)
+	start := time.Now()
+	defer func() {
+		r.metrics.totalRepairFinished.Inc(1)
+		r.metrics.totalRepairLatency.Inc(time.Since(start).Seconds())
+	}()
+
+	r.l.Debug().Msg("starting repair property schema cycle")
 
 	nodes := r.getActivatedNodes()
+	r.metrics.totalRepairNodes.Inc(float64(len(nodes)))
 	messenger := r.server.propertyService.GetGossIPMessenger()
-	err := messenger.Propagation(nodes, SchemaGroup, 0)
-	if err != nil {
-		r.l.Err(err).Msg("failed to propagate schema")
+	propagateErr := messenger.Propagation(nodes, SchemaGroup, 0)
+	if propagateErr != nil {
+		r.metrics.totalRepairErr.Inc(1)
+		r.l.Err(propagateErr).Msg("failed to propagate schema")
 		return
 	}
-	r.l.Info().Int("node_count", len(nodes)).Msg("propagated schema to nodes success")
+	r.l.Debug().Int("node_count", len(nodes)).Msg("propagated schema to nodes success")
 }
 
 func (r *repairScheduler) getActivatedNodes() []string {

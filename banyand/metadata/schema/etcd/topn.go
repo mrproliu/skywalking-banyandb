@@ -20,12 +20,12 @@ package etcd
 import (
 	"context"
 
-	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/common/v1"
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
 	"github.com/apache/skywalking-banyandb/api/validate"
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 )
 
 var topNAggregationKeyPrefix = "/topnagg/"

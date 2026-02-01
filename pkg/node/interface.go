@@ -23,11 +23,11 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 	"github.com/pkg/errors"
 	"golang.org/x/exp/slices"
 
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 	"github.com/apache/skywalking-banyandb/banyand/queue/pub"
 	"github.com/apache/skywalking-banyandb/pkg/run"
 )

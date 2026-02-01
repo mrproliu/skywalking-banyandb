@@ -21,7 +21,6 @@ import (
 	"context"
 	"path"
 
-	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 	"github.com/pkg/errors"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/proto"
@@ -29,6 +28,7 @@ import (
 
 	commonv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/common/v1"
 	"github.com/apache/skywalking-banyandb/api/validate"
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 )
 
 var groupsKeyPrefix = "/groups/"

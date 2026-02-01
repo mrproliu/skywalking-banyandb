@@ -27,7 +27,6 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gleak"
@@ -36,6 +35,7 @@ import (
 	"go.etcd.io/etcd/server/v3/embed"
 
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 	"github.com/apache/skywalking-banyandb/pkg/pool"
 	"github.com/apache/skywalking-banyandb/pkg/test"
 	"github.com/apache/skywalking-banyandb/pkg/test/flags"

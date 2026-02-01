@@ -21,10 +21,10 @@ import (
 	"context"
 	"path"
 
-	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 	"github.com/pkg/errors"
 
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 )
 
 var nodeKeyPrefix = "/nodes/"

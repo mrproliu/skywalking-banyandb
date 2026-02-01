@@ -21,12 +21,12 @@ import (
 	"context"
 	"hash/crc32"
 
-	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/common/v1"
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
 	"github.com/apache/skywalking-banyandb/api/validate"
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 )
 
 var (
@@ -109,7 +109,7 @@ func (e *etcdSchemaRegistry) GetIndexRule(ctx context.Context, metadata *commonv
 		return nil, err
 	}
 	if entity.Metadata.Id == 0 {
-		return nil, schema.ErrGRPCDataLoss
+		return nil, errGRPCDataLoss
 	}
 	return &entity, nil
 }
@@ -126,7 +126,7 @@ func (e *etcdSchemaRegistry) ListIndexRule(ctx context.Context, opt schema.ListO
 	for _, message := range messages {
 		entity := message.(*databasev1.IndexRule)
 		if entity.Metadata.Id == 0 {
-			return nil, schema.ErrGRPCDataLoss
+			return nil, errGRPCDataLoss
 		}
 		entities = append(entities, entity)
 	}

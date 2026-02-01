@@ -26,191 +26,29 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	commonv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/common/v1"
 	modelv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/model/v1"
-	propertyv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/property/v1"
 	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 )
 
-func TestSchemaCache_NewSchemaCache(t *testing.T) {
-	cache := newSchemaCache()
-	assert.NotNil(t, cache)
-	assert.NotNil(t, cache.entries)
-	assert.Equal(t, int64(0), cache.maxRevision)
-}
-
-func TestSchemaCache_Update(t *testing.T) {
-	cache := newSchemaCache()
-
-	entry1 := cacheEntry{
-		valueHash:   123456,
-		modRevision: 100,
-		kind:        schema.KindStream,
-		group:       "test-group",
-		name:        "test-stream",
-	}
-
-	changed := cache.Update("stream_test-group/test-stream", entry1)
-	assert.True(t, changed, "First update should return true")
-	assert.Equal(t, int64(100), cache.GetMaxRevision())
-
-	changed = cache.Update("stream_test-group/test-stream", entry1)
-	assert.False(t, changed, "Same entry update should return false")
-
-	entry2 := cacheEntry{
-		valueHash:   789012,
-		modRevision: 150,
-		kind:        schema.KindStream,
-		group:       "test-group",
-		name:        "test-stream",
-	}
-	changed = cache.Update("stream_test-group/test-stream", entry2)
-	assert.True(t, changed, "Updated entry should return true")
-	assert.Equal(t, int64(150), cache.GetMaxRevision())
-
-	oldEntry := cacheEntry{
-		valueHash:   111111,
-		modRevision: 50,
-		kind:        schema.KindStream,
-		group:       "test-group",
-		name:        "test-stream",
-	}
-	changed = cache.Update("stream_test-group/test-stream", oldEntry)
-	assert.False(t, changed, "Older revision should return false")
-	assert.Equal(t, int64(150), cache.GetMaxRevision())
-}
-
-func TestSchemaCache_Delete(t *testing.T) {
-	cache := newSchemaCache()
-
-	entry := cacheEntry{
-		valueHash:   123456,
-		modRevision: 100,
-		kind:        schema.KindStream,
-		group:       "test-group",
-		name:        "test-stream",
-	}
-	cache.Update("stream_test-group/test-stream", entry)
-
-	deleted := cache.Delete("stream_test-group/test-stream")
-	assert.True(t, deleted, "Deleting existing entry should return true")
-
-	deleted = cache.Delete("stream_test-group/test-stream")
-	assert.False(t, deleted, "Deleting non-existing entry should return false")
-
-	deleted = cache.Delete("non-existent-key")
-	assert.False(t, deleted, "Deleting non-existent key should return false")
-}
-
-func TestSchemaCache_GetMaxRevision(t *testing.T) {
-	cache := newSchemaCache()
-	assert.Equal(t, int64(0), cache.GetMaxRevision())
-
-	cache.Update("key1", cacheEntry{modRevision: 100})
-	assert.Equal(t, int64(100), cache.GetMaxRevision())
-
-	cache.Update("key2", cacheEntry{modRevision: 200})
-	assert.Equal(t, int64(200), cache.GetMaxRevision())
-
-	cache.Update("key3", cacheEntry{modRevision: 150})
-	assert.Equal(t, int64(200), cache.GetMaxRevision())
-}
-
-func TestSchemaCache_GetAllEntries(t *testing.T) {
-	cache := newSchemaCache()
-
-	entries := cache.GetAllEntries()
-	assert.Empty(t, entries)
-
-	cache.Update("key1", cacheEntry{modRevision: 100, kind: schema.KindStream})
-	cache.Update("key2", cacheEntry{modRevision: 200, kind: schema.KindMeasure})
-
-	entries = cache.GetAllEntries()
-	assert.Len(t, entries, 2)
-	assert.Contains(t, entries, "key1")
-	assert.Contains(t, entries, "key2")
-
-	entries["key3"] = cacheEntry{}
-	originalEntries := cache.GetAllEntries()
-	assert.Len(t, originalEntries, 2)
-}
-
-func TestSchemaCache_Concurrency(t *testing.T) {
-	cache := newSchemaCache()
-	var wg sync.WaitGroup
-	numGoroutines := 100
-
-	for i := 0; i < numGoroutines; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			for j := 0; j < 100; j++ {
-				entry := cacheEntry{
-					valueHash:   uint64(idx*1000 + j),
-					modRevision: int64(idx*1000 + j),
-					kind:        schema.KindStream,
-				}
-				cache.Update("concurrent-key", entry)
-				cache.GetMaxRevision()
-				cache.GetAllEntries()
-			}
-		}(i)
-	}
-	wg.Wait()
-
-	assert.True(t, cache.GetMaxRevision() > 0)
-}
-
-func TestSchemaCache_GetEntriesByKind(t *testing.T) {
-	cache := newSchemaCache()
-
-	entries := cache.GetEntriesByKind(schema.KindStream)
-	assert.Empty(t, entries)
-
-	cache.Update("stream_group1/stream1", cacheEntry{modRevision: 100, kind: schema.KindStream, group: "group1", name: "stream1"})
-	cache.Update("stream_group1/stream2", cacheEntry{modRevision: 101, kind: schema.KindStream, group: "group1", name: "stream2"})
-	cache.Update("measure_group1/measure1", cacheEntry{modRevision: 102, kind: schema.KindMeasure, group: "group1", name: "measure1"})
-	cache.Update("group_group1", cacheEntry{modRevision: 103, kind: schema.KindGroup, group: "", name: "group1"})
-
-	streamEntries := cache.GetEntriesByKind(schema.KindStream)
-	assert.Len(t, streamEntries, 2)
-	assert.Contains(t, streamEntries, "stream_group1/stream1")
-	assert.Contains(t, streamEntries, "stream_group1/stream2")
-
-	measureEntries := cache.GetEntriesByKind(schema.KindMeasure)
-	assert.Len(t, measureEntries, 1)
-	assert.Contains(t, measureEntries, "measure_group1/measure1")
-
-	groupEntries := cache.GetEntriesByKind(schema.KindGroup)
-	assert.Len(t, groupEntries, 1)
-	assert.Contains(t, groupEntries, "group_group1")
-
-	traceEntries := cache.GetEntriesByKind(schema.KindTrace)
-	assert.Empty(t, traceEntries)
-
-	streamEntries["new_key"] = cacheEntry{}
-	originalStreamEntries := cache.GetEntriesByKind(schema.KindStream)
-	assert.Len(t, originalStreamEntries, 2)
-}
+var syncInterval = 5 * time.Second
 
 func TestSchemaRegistry_HandleDeletion(t *testing.T) {
-	registry := NewSchemaRegistryClient(nil, 5*time.Second)
+	registry := NewSchemaRegistryClient(nil, 5*time.Second, syncInterval)
 	defer registry.Close()
 
 	handler := newMockEventHandler()
 	registry.addHandler(schema.KindStream, handler)
 
 	entry := cacheEntry{
-		valueHash:   123456,
-		modRevision: 100,
-		kind:        schema.KindStream,
-		group:       "test-group",
-		name:        "test-stream",
+		latestUpdateAt: 100,
+		kind:           schema.KindStream,
+		group:          "test-group",
+		name:           "test-stream",
 	}
 	propID := "stream_test-group/test-stream"
-	registry.cache.Update(propID, entry)
+	registry.cache.Update(propID, &entry)
 
-	registry.handleDeletion(schema.KindStream, propID, entry)
+	registry.handleDeletion(schema.KindStream, propID, &entry, 100)
 
 	assert.Equal(t, int32(1), handler.deleteCalled.Load())
 	handler.mu.Lock()
@@ -226,33 +64,62 @@ func TestSchemaRegistry_HandleDeletion(t *testing.T) {
 }
 
 func TestSchemaRegistry_HandleDeletion_NotInCache(t *testing.T) {
-	registry := NewSchemaRegistryClient(nil, 5*time.Second)
+	registry := NewSchemaRegistryClient(nil, 5*time.Second, syncInterval)
 	defer registry.Close()
 
 	handler := newMockEventHandler()
 	registry.addHandler(schema.KindStream, handler)
 
 	entry := cacheEntry{
-		valueHash:   123456,
-		modRevision: 100,
-		kind:        schema.KindStream,
-		group:       "test-group",
-		name:        "test-stream",
+		latestUpdateAt: 100,
+		kind:           schema.KindStream,
+		group:          "test-group",
+		name:           "test-stream",
 	}
 	propID := "stream_test-group/test-stream"
 
-	registry.handleDeletion(schema.KindStream, propID, entry)
+	registry.handleDeletion(schema.KindStream, propID, &entry, 100)
 
 	assert.Equal(t, int32(0), handler.deleteCalled.Load())
+}
+
+func TestSchemaRegistry_HandleDeletion_OlderRevision(t *testing.T) {
+	registry := NewSchemaRegistryClient(nil, 5*time.Second, syncInterval)
+	defer registry.Close()
+
+	handler := newMockEventHandler()
+	registry.addHandler(schema.KindStream, handler)
+
+	entry := cacheEntry{
+		latestUpdateAt: 200,
+		kind:           schema.KindStream,
+		group:          "test-group",
+		name:           "test-stream",
+	}
+	propID := "stream_test-group/test-stream"
+	registry.cache.Update(propID, &entry)
+
+	// Try to delete with an older revision — should be rejected
+	olderEntry := cacheEntry{
+		latestUpdateAt: 50,
+		kind:           schema.KindStream,
+		group:          "test-group",
+		name:           "test-stream",
+	}
+	registry.handleDeletion(schema.KindStream, propID, &olderEntry, 50)
+
+	assert.Equal(t, int32(0), handler.deleteCalled.Load())
+	allEntries := registry.cache.GetAllEntries()
+	assert.Contains(t, allEntries, propID)
 }
 
 func TestParsePropertyID(t *testing.T) {
 	tests := []struct {
 		name          string
 		propID        string
-		expectedKind  schema.Kind
 		expectedGroup string
 		expectedName  string
+		expectedKind  schema.Kind
 	}{
 		{
 			name:          "stream with group",
@@ -274,13 +141,6 @@ func TestParsePropertyID(t *testing.T) {
 			expectedKind:  schema.KindGroup,
 			expectedGroup: "",
 			expectedName:  "mygroup",
-		},
-		{
-			name:          "node without group field",
-			propID:        "node_node-1",
-			expectedKind:  schema.KindNode,
-			expectedGroup: "",
-			expectedName:  "node-1",
 		},
 		{
 			name:          "indexRule with group",
@@ -322,22 +182,22 @@ func TestParsePropertyID(t *testing.T) {
 	}
 }
 
-func TestBuildModRevisionCriteria(t *testing.T) {
-	criteria := buildModRevisionCriteria(0)
+func TestBuildUpdatedAtCriteria(t *testing.T) {
+	criteria := buildUpdatedAtCriteria(0)
 	assert.Nil(t, criteria, "sinceRevision 0 should return nil")
 
-	criteria = buildModRevisionCriteria(-1)
+	criteria = buildUpdatedAtCriteria(-1)
 	assert.Nil(t, criteria, "sinceRevision -1 should return nil")
 
-	criteria = buildModRevisionCriteria(100)
+	criteria = buildUpdatedAtCriteria(100)
 	require.NotNil(t, criteria)
 	condition := criteria.GetCondition()
 	require.NotNil(t, condition)
-	assert.Equal(t, TagKeyModRevision, condition.Name)
+	assert.Equal(t, TagKeyUpdatedAt, condition.Name)
 	assert.Equal(t, modelv1.Condition_BINARY_OP_GT, condition.Op)
 	assert.Equal(t, int64(100), condition.Value.GetInt().GetValue())
 
-	criteria = buildModRevisionCriteria(999999)
+	criteria = buildUpdatedAtCriteria(999999)
 	require.NotNil(t, criteria)
 	assert.Equal(t, int64(999999), criteria.GetCondition().Value.GetInt().GetValue())
 }
@@ -382,13 +242,13 @@ func TestGetNameFromTags(t *testing.T) {
 }
 
 func TestNewSchemaRegistry(t *testing.T) {
-	registry := NewSchemaRegistryClient(nil, 5*time.Second)
+	registry := NewSchemaRegistryClient(nil, 5*time.Second, syncInterval)
 	require.NotNil(t, registry)
 	assert.NotNil(t, registry.nodeConns)
 	assert.NotNil(t, registry.handlers)
 	assert.NotNil(t, registry.cache)
 	assert.NotNil(t, registry.closer)
-	assert.Equal(t, defaultSyncInterval, registry.syncInterval)
+	assert.Equal(t, syncInterval, registry.syncInterval)
 
 	closeErr := registry.Close()
 	assert.NoError(t, closeErr)
@@ -431,7 +291,7 @@ func (m *mockEventHandler) OnDelete(md schema.Metadata) {
 }
 
 func TestSchemaRegistry_RegisterHandler(t *testing.T) {
-	registry := NewSchemaRegistryClient(nil, 5*time.Second)
+	registry := NewSchemaRegistryClient(nil, 5*time.Second, syncInterval)
 	defer registry.Close()
 
 	handler := newMockEventHandler()
@@ -446,7 +306,7 @@ func TestSchemaRegistry_RegisterHandler(t *testing.T) {
 }
 
 func TestSchemaRegistry_RegisterHandler_MultipleKinds(t *testing.T) {
-	registry := NewSchemaRegistryClient(nil, 5*time.Second)
+	registry := NewSchemaRegistryClient(nil, 5*time.Second, syncInterval)
 	defer registry.Close()
 
 	handler := newMockEventHandler()
@@ -463,7 +323,7 @@ func TestSchemaRegistry_RegisterHandler_MultipleKinds(t *testing.T) {
 }
 
 func TestSchemaRegistry_OnInit(t *testing.T) {
-	registry := NewSchemaRegistryClient(nil, 5*time.Second)
+	registry := NewSchemaRegistryClient(nil, 5*time.Second, syncInterval)
 	defer registry.Close()
 
 	ok, revisions := registry.OnInit([]schema.Kind{schema.KindStream, schema.KindMeasure})
@@ -472,7 +332,7 @@ func TestSchemaRegistry_OnInit(t *testing.T) {
 }
 
 func TestSchemaRegistry_AddHandler(t *testing.T) {
-	registry := NewSchemaRegistryClient(nil, 5*time.Second)
+	registry := NewSchemaRegistryClient(nil, 5*time.Second, syncInterval)
 	defer registry.Close()
 
 	handler1 := newMockEventHandler()
@@ -488,7 +348,7 @@ func TestSchemaRegistry_AddHandler(t *testing.T) {
 }
 
 func TestSchemaRegistry_NotifyHandlers(t *testing.T) {
-	registry := NewSchemaRegistryClient(nil, 5*time.Second)
+	registry := NewSchemaRegistryClient(nil, 5*time.Second, syncInterval)
 	defer registry.Close()
 
 	handler := newMockEventHandler()
@@ -515,71 +375,9 @@ func TestSchemaRegistry_NotifyHandlers(t *testing.T) {
 	handler.mu.Unlock()
 }
 
-func TestSchemaRegistry_NotifyHandlers_NoHandlers(t *testing.T) {
-	registry := NewSchemaRegistryClient(nil, 5*time.Second)
-	defer registry.Close()
-
-	md := schema.Metadata{
-		TypeMeta: schema.TypeMeta{
-			Kind:  schema.KindStream,
-			Name:  "test-stream",
-			Group: "test-group",
-		},
-	}
-
-	registry.notifyHandlers(schema.KindStream, md, false)
-}
-
 func TestSchemaRegistry_Close(t *testing.T) {
-	registry := NewSchemaRegistryClient(nil, 5*time.Second)
+	registry := NewSchemaRegistryClient(nil, 5*time.Second, syncInterval)
 
 	closeErr := registry.Close()
 	assert.NoError(t, closeErr)
-}
-
-func TestComputePropertyHash(t *testing.T) {
-	prop1 := createTestProperty("id1", "group1", "name1")
-	prop2 := createTestProperty("id1", "group1", "name1")
-	prop3 := createTestProperty("id2", "group2", "name2")
-
-	hash1 := computePropertyHash(prop1)
-	hash2 := computePropertyHash(prop2)
-	hash3 := computePropertyHash(prop3)
-
-	assert.Equal(t, hash1, hash2, "Same properties should have same hash")
-	assert.NotEqual(t, hash1, hash3, "Different properties should have different hash")
-	assert.NotZero(t, hash1)
-}
-
-func TestSchemaCache_Update_HashChange(t *testing.T) {
-	cache := newSchemaCache()
-
-	entry1 := cacheEntry{
-		valueHash:   100,
-		modRevision: 50,
-		kind:        schema.KindStream,
-	}
-	cache.Update("key1", entry1)
-
-	entry2 := cacheEntry{
-		valueHash:   200,
-		modRevision: 50,
-		kind:        schema.KindStream,
-	}
-	changed := cache.Update("key1", entry2)
-	assert.True(t, changed, "Hash change should trigger update")
-}
-
-func createTestProperty(id, group, name string) *propertyv1.Property {
-	return &propertyv1.Property{
-		Metadata: &commonv1.Metadata{
-			Group: group,
-			Name:  name,
-		},
-		Id: id,
-		Tags: []*modelv1.Tag{
-			{Key: TagKeyGroup, Value: &modelv1.TagValue{Value: &modelv1.TagValue_Str{Str: &modelv1.Str{Value: group}}}},
-			{Key: TagKeyName, Value: &modelv1.TagValue{Value: &modelv1.TagValue_Str{Str: &modelv1.Str{Value: name}}}},
-		},
-	}
 }

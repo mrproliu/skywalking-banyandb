@@ -5409,6 +5409,7 @@ WriteResponse is the response contract for write
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | delete | [banyandb.property.v1.DeleteRequest](#banyandb-property-v1-DeleteRequest) |  |  |
+| update_at | [google.protobuf.Timestamp](#google-protobuf-Timestamp) |  | Update the update time for notification |
 
 
 

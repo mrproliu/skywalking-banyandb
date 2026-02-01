@@ -24,8 +24,6 @@ import (
 	"io"
 	"time"
 
-	metadatclient "github.com/apache/skywalking-banyandb/banyand/metadata/client"
-	"github.com/apache/skywalking-banyandb/banyand/metadata/schema/etcd"
 	g "github.com/onsi/ginkgo/v2"
 	gm "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gleak"
@@ -34,7 +32,9 @@ import (
 
 	measurev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/measure/v1"
 	modelv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/model/v1"
+	metadatclient "github.com/apache/skywalking-banyandb/banyand/metadata/client"
 	"github.com/apache/skywalking-banyandb/banyand/metadata/embeddedetcd"
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema/etcd"
 	"github.com/apache/skywalking-banyandb/pkg/grpchelper"
 	"github.com/apache/skywalking-banyandb/pkg/pool"
 	"github.com/apache/skywalking-banyandb/pkg/test"
@@ -93,7 +93,7 @@ var _ = g.Describe("Disk", func() {
 		<-server.ReadyNotify()
 		g.By("Loading schema")
 		schemaRegistry, err := etcd.NewEtcdSchemaRegistry(
-			etcd.Namespace(client.DefaultNamespace),
+			etcd.Namespace(metadatclient.DefaultNamespace),
 			etcd.ConfigureServerEndpoints([]string{ep}),
 		)
 		gm.Expect(err).NotTo(gm.HaveOccurred())

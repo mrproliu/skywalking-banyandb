@@ -21,7 +21,6 @@ import (
 	"context"
 	"os"
 
-	metadatclient "github.com/apache/skywalking-banyandb/banyand/metadata/client"
 	"github.com/spf13/cobra"
 
 	"github.com/apache/skywalking-banyandb/api/common"
@@ -32,6 +31,7 @@ import (
 	"github.com/apache/skywalking-banyandb/banyand/liaison/grpc/route"
 	"github.com/apache/skywalking-banyandb/banyand/liaison/http"
 	"github.com/apache/skywalking-banyandb/banyand/measure"
+	metadatclient "github.com/apache/skywalking-banyandb/banyand/metadata/client"
 	"github.com/apache/skywalking-banyandb/banyand/observability"
 	"github.com/apache/skywalking-banyandb/banyand/observability/services"
 	"github.com/apache/skywalking-banyandb/banyand/protector"

@@ -75,7 +75,6 @@ BanyanDB, as an observability database, aims to ingest, analyze and store Metric
 	cmd.AddCommand(newStandaloneCmd(runners...))
 	cmd.AddCommand(newDataCmd(runners...))
 	cmd.AddCommand(newLiaisonCmd(runners...))
-	cmd.AddCommand(newMetadataCmd(runners...))
 	return cmd
 }
 

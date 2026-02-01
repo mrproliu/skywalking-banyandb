@@ -45,8 +45,8 @@ const (
 	TagKeySource = "source"
 	// TagKeyKind is the tag key for schema kind.
 	TagKeyKind = "kind"
-	// TagKeyModRevision is the tag key for mod revision.
-	TagKeyModRevision = "mod_revision"
+	// TagKeyUpdatedAt is the tag key for updated at timestamp.
+	TagKeyUpdatedAt = "updated_at"
 )
 
 var errUnsupportedKind = errors.New("unsupported schema kind")
@@ -54,6 +54,10 @@ var errUnsupportedKind = errors.New("unsupported schema kind")
 // SchemaToProperty converts a schema spec to Property format.
 func SchemaToProperty(kind schema.Kind, spec proto.Message) (*propertyv1.Property, error) {
 	metadata, schemaErr := getMetadataFromSpec(kind, spec)
+	if schemaErr != nil {
+		return nil, schemaErr
+	}
+	updateAt, schemaErr := getUpdateAtFromSpec(kind, spec)
 	if schemaErr != nil {
 		return nil, schemaErr
 	}
@@ -72,22 +76,22 @@ func SchemaToProperty(kind schema.Kind, spec proto.Message) (*propertyv1.Propert
 		Tags: []*modelv1.Tag{
 			{Key: TagKeyGroup, Value: &modelv1.TagValue{Value: &modelv1.TagValue_Str{Str: &modelv1.Str{Value: metadata.GetGroup()}}}},
 			{Key: TagKeyName, Value: &modelv1.TagValue{Value: &modelv1.TagValue_Str{Str: &modelv1.Str{Value: metadata.GetName()}}}},
-			{Key: TagKeySource, Value: &modelv1.TagValue{Value: &modelv1.TagValue_BinaryData{BinaryData: sourceBytes}}},
+			{Key: TagKeySource, Value: &modelv1.TagValue{Value: &modelv1.TagValue_Str{Str: &modelv1.Str{Value: string(sourceBytes)}}}},
 			{Key: TagKeyKind, Value: &modelv1.TagValue{Value: &modelv1.TagValue_Str{Str: &modelv1.Str{Value: kind.String()}}}},
-			{Key: TagKeyModRevision, Value: &modelv1.TagValue{Value: &modelv1.TagValue_Int{Int: &modelv1.Int{Value: metadata.GetModRevision()}}}},
+			{Key: TagKeyUpdatedAt, Value: &modelv1.TagValue{Value: &modelv1.TagValue_Int{Int: &modelv1.Int{Value: updateAt.AsTime().UnixNano()}}}},
 		},
-		UpdatedAt: timestamppb.Now(),
+		UpdatedAt: updateAt,
 	}
 	return prop, nil
 }
 
 // ToSchema converts Property back to schema spec.
 func ToSchema(kind schema.Kind, prop *propertyv1.Property) (schema.Metadata, error) {
-	var sourceBytes []byte
+	var sourceBytes string
 	for _, tag := range prop.Tags {
 		if tag.Key == TagKeySource {
-			if binaryData := tag.Value.GetBinaryData(); binaryData != nil {
-				sourceBytes = binaryData
+			if strData := tag.Value.GetStr(); strData != nil {
+				sourceBytes = strData.Value
 			}
 			break
 		}
@@ -117,7 +121,7 @@ func ToSchema(kind schema.Kind, prop *propertyv1.Property) (schema.Metadata, err
 
 // BuildPropertyID creates unique ID: kind.String() + "_" + group + "/" + name.
 func BuildPropertyID(kind schema.Kind, metadata *commonv1.Metadata) string {
-	if kind == schema.KindGroup || kind == schema.KindNode {
+	if kind == schema.KindGroup {
 		return kind.String() + "_" + metadata.GetName()
 	}
 	return kind.String() + "_" + metadata.GetGroup() + "/" + metadata.GetName()
@@ -125,7 +129,7 @@ func BuildPropertyID(kind schema.Kind, metadata *commonv1.Metadata) string {
 
 // BuildPropertyIDFromMeta creates unique ID from schema.TypeMeta.
 func BuildPropertyIDFromMeta(meta schema.TypeMeta) string {
-	if meta.Kind == schema.KindGroup || meta.Kind == schema.KindNode {
+	if meta.Kind == schema.KindGroup {
 		return meta.Kind.String() + "_" + meta.Name
 	}
 	return meta.Kind.String() + "_" + meta.Group + "/" + meta.Name
@@ -161,21 +165,59 @@ func getMetadataFromSpec(kind schema.Kind, spec proto.Message) (*commonv1.Metada
 		if t, ok := spec.(*databasev1.TopNAggregation); ok {
 			return t.GetMetadata(), nil
 		}
-	case schema.KindNode:
-		if n, ok := spec.(*databasev1.Node); ok {
-			return n.GetMetadata(), nil
-		}
 	case schema.KindProperty:
 		if p, ok := spec.(*databasev1.Property); ok {
 			return p.GetMetadata(), nil
 		}
+	case schema.KindNode:
 	case schema.KindMask:
 		return nil, fmt.Errorf("%w: %s", errUnsupportedKind, kind.String())
 	}
 	return nil, fmt.Errorf("%w: %s", errUnsupportedKind, kind.String())
 }
 
-func unmarshalSpec(kind schema.Kind, data []byte) (proto.Message, error) {
+func getUpdateAtFromSpec(kind schema.Kind, spec proto.Message) (*timestamppb.Timestamp, error) {
+	switch kind {
+	case schema.KindGroup:
+		if g, ok := spec.(*commonv1.Group); ok {
+			return g.GetUpdatedAt(), nil
+		}
+	case schema.KindStream:
+		if s, ok := spec.(*databasev1.Stream); ok {
+			return s.GetUpdatedAt(), nil
+		}
+	case schema.KindMeasure:
+		if m, ok := spec.(*databasev1.Measure); ok {
+			return m.GetUpdatedAt(), nil
+		}
+	case schema.KindTrace:
+		if t, ok := spec.(*databasev1.Trace); ok {
+			return t.GetUpdatedAt(), nil
+		}
+	case schema.KindIndexRule:
+		if ir, ok := spec.(*databasev1.IndexRule); ok {
+			return ir.GetUpdatedAt(), nil
+		}
+	case schema.KindIndexRuleBinding:
+		if irb, ok := spec.(*databasev1.IndexRuleBinding); ok {
+			return irb.GetUpdatedAt(), nil
+		}
+	case schema.KindTopNAggregation:
+		if t, ok := spec.(*databasev1.TopNAggregation); ok {
+			return t.GetUpdatedAt(), nil
+		}
+	case schema.KindProperty:
+		if p, ok := spec.(*databasev1.Property); ok {
+			return p.GetUpdatedAt(), nil
+		}
+	case schema.KindNode:
+	case schema.KindMask:
+		return nil, fmt.Errorf("%w: %s", errUnsupportedKind, kind.String())
+	}
+	return nil, fmt.Errorf("%w: %s", errUnsupportedKind, kind.String())
+}
+
+func unmarshalSpec(kind schema.Kind, data string) (proto.Message, error) {
 	var spec proto.Message
 	switch kind {
 	case schema.KindGroup:
@@ -199,7 +241,7 @@ func unmarshalSpec(kind schema.Kind, data []byte) (proto.Message, error) {
 	default:
 		return nil, fmt.Errorf("%w: %s", errUnsupportedKind, kind.String())
 	}
-	if unmarshalErr := protojson.Unmarshal(data, spec); unmarshalErr != nil {
+	if unmarshalErr := protojson.Unmarshal([]byte(data), spec); unmarshalErr != nil {
 		return nil, fmt.Errorf("failed to unmarshal spec: %w", unmarshalErr)
 	}
 	return spec, nil

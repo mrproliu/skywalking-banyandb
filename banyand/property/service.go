@@ -25,6 +25,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/robfig/cron/v3"
+	"github.com/spf13/pflag"
+	"go.uber.org/multierr"
+
 	"github.com/apache/skywalking-banyandb/api/common"
 	"github.com/apache/skywalking-banyandb/api/data"
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
@@ -39,9 +43,6 @@ import (
 	"github.com/apache/skywalking-banyandb/pkg/fs"
 	"github.com/apache/skywalking-banyandb/pkg/logger"
 	"github.com/apache/skywalking-banyandb/pkg/run"
-	"github.com/robfig/cron/v3"
-	"github.com/spf13/pflag"
-	"go.uber.org/multierr"
 )
 
 const (

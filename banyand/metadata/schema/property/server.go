@@ -19,74 +19,52 @@ package property
 
 import (
 	"context"
-	"path/filepath"
-	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/pkg/errors"
 	"github.com/robfig/cron/v3"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/apache/skywalking-banyandb/api/common"
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
+	modelv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/model/v1"
 	propertyv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/property/v1"
 	schemav1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/schema/v1"
-	"github.com/apache/skywalking-banyandb/banyand/internal/storage"
 	"github.com/apache/skywalking-banyandb/banyand/metadata"
 	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 	"github.com/apache/skywalking-banyandb/banyand/observability"
 	"github.com/apache/skywalking-banyandb/banyand/property"
 	"github.com/apache/skywalking-banyandb/banyand/protector"
-	"github.com/apache/skywalking-banyandb/pkg/fs"
 	"github.com/apache/skywalking-banyandb/pkg/logger"
-	"github.com/apache/skywalking-banyandb/pkg/meter"
 	"github.com/apache/skywalking-banyandb/pkg/run"
 )
 
 const (
-	lockFilename        = "lock"
 	defaultRepairCron   = "@every 10m"
-	metadataSubDir      = "metadata"
-	metadataServiceName = "metadata-property"
+	metadataServiceName = "metadata-property-server"
 )
 
-var (
-	errEmptyRootPath = errors.New("root path is empty")
-	metadataScope    = observability.RootScope.SubScope("metadata_property")
-)
+var metadataScope = observability.RootScope.SubScope("metadata_property")
 
 // Server is the metadata property server that stores schema data as properties.
 type Server struct {
 	propertyService   property.Service
 	omr               observability.MetricsRegistry
 	pm                protector.Memory
-	lfs               fs.FileSystem
-	lock              fs.File
-	metadataSvc       metadata.Service
+	metadataSvc       metadata.HandlerRegister
 	l                 *logger.Logger
 	repairScheduler   *repairScheduler
-	snapshotManager   *snapshotManager
-	close             chan struct{}
-	root              string
+	closer            *run.Closer
 	repairTriggerCron string
-	flushInterval     time.Duration
-	mu                sync.RWMutex
-	repairEnabled     bool
-	closed            atomic.Bool
 }
 
 // NewServer creates a new metadata property server.
-func NewServer(propertyService property.Service, omr observability.MetricsRegistry, metadataSvc metadata.Service, pm protector.Memory) *Server {
+func NewServer(propertyService property.Service, omr observability.MetricsRegistry, metadataSvc metadata.HandlerRegister, pm protector.Memory) *Server {
 	return &Server{
-		propertyService:   propertyService,
-		omr:               omr,
-		pm:                pm,
-		close:             make(chan struct{}),
-		repairTriggerCron: defaultRepairCron,
-		flushInterval:     5 * time.Second,
-		repairEnabled:     true,
-		metadataSvc:       metadataSvc,
+		propertyService: propertyService,
+		metadataSvc:     metadataSvc,
+		omr:             omr,
+		pm:              pm,
+		closer:          run.NewCloser(0),
 	}
 }
 
@@ -103,16 +81,14 @@ func (s *Server) Role() databasev1.Role {
 // FlagSet returns the flag set for configuration.
 func (s *Server) FlagSet() *run.FlagSet {
 	fs := run.NewFlagSet("metadata-property")
-	fs.StringVar(&s.root, "metadata-property-root-path", "/tmp", "the root path of metadata property storage")
 	fs.StringVar(&s.repairTriggerCron, "metadata-property-repair-trigger-cron", defaultRepairCron, "the cron expression for repair trigger")
-	fs.BoolVar(&s.repairEnabled, "metadata-property-repair-enabled", true, "enable repair mechanism")
 	return fs
 }
 
 // Validate validates the server configuration.
 func (s *Server) Validate() error {
-	if s.root == "" {
-		return errEmptyRootPath
+	if s.repairTriggerCron == "" {
+		return errors.New("repair trigger cron is required")
 	}
 	if _, cronErr := cron.ParseStandard(s.repairTriggerCron); cronErr != nil {
 		return errors.New("metadata-property-repair-trigger-cron is not a valid cron expression")
@@ -121,41 +97,22 @@ func (s *Server) Validate() error {
 }
 
 // PreRun initializes the server.
-func (s *Server) PreRun(ctx context.Context) error {
+func (s *Server) PreRun(context.Context) error {
 	s.l = logger.GetLogger(s.Name())
-	s.lfs = fs.NewLocalFileSystemWithLoggerAndLimit(s.l, s.pm.GetLimit())
-	location := filepath.Join(s.root, "property", metadataSubDir, storage.DataDir)
-	s.lfs.MkdirIfNotExist(location, storage.DirPerm)
-	val := ctx.Value(common.ContextNodeKey)
-	if val == nil {
-		return errors.New("node id is empty")
-	}
 	if s.propertyService == nil {
 		return errors.New("property service is not set")
 	}
-	_ = s.omr.With(metadataScope.ConstLabels(meter.LabelPairs{"server": metadataServiceName}))
-	lockPath := filepath.Join(location, lockFilename)
-	var lockErr error
-	s.lock, lockErr = s.lfs.CreateLockFile(lockPath, storage.FilePerm)
-	if lockErr != nil {
-		s.l.Error().Err(lockErr).Msg("failed to create lock file")
-		return lockErr
-	}
 
 	// Initialize repair scheduler
+	repairFactory := s.omr.With(metadataScope.SubScope("repair"))
 	var repairErr error
-	s.repairScheduler, repairErr = newRepairScheduler(s, s.repairTriggerCron, s.repairEnabled, s.l)
+	s.repairScheduler, repairErr = newRepairScheduler(s, s.repairTriggerCron, s.l, repairFactory)
 	if repairErr != nil {
 		return repairErr
 	}
-	s.metadataSvc.RegisterHandler("metadata-node-property", schema.KindNode, s.repairScheduler)
-
-	// Initialize snapshot manager
-	snapshotDir := filepath.Join(s.root, "property", metadataSubDir, "snapshots")
-	s.lfs.MkdirIfNotExist(snapshotDir, storage.DirPerm)
-	s.snapshotManager = newSnapshotManager(s, snapshotDir, s.l)
-
-	s.l.Info().Str("path", location).Msg("metadata property server initialized")
+	if s.metadataSvc != nil {
+		s.metadataSvc.RegisterHandler("metadata-node-property", schema.KindNode, s.repairScheduler)
+	}
 	return nil
 }
 
@@ -164,77 +121,49 @@ func (s *Server) Serve() run.StopNotify {
 	if startErr := s.repairScheduler.Start(); startErr != nil {
 		s.l.Error().Err(startErr).Msg("failed to start repair scheduler")
 	}
-	return s.close
+	return s.closer.CloseNotify()
 }
 
 // GracefulStop stops the server gracefully.
 func (s *Server) GracefulStop() {
-	if s.closed.Swap(true) {
-		return
-	}
-	close(s.close)
 	if s.repairScheduler != nil {
 		s.repairScheduler.Stop()
-	}
-	if s.lock != nil {
-		s.lock.Close()
-	}
-}
-
-// SchemaManagementService returns the schema management service handler.
-func (s *Server) SchemaManagementService() schemav1.SchemaManagementServiceServer {
-	return &schemaManagementServer{
-		server: s,
-		l:      s.l,
-	}
-}
-
-// SchemaUpdateService returns the schema update service handler.
-func (s *Server) SchemaUpdateService() schemav1.SchemaUpdateServiceServer {
-	return &schemaUpdateServer{
-		server: s,
-		l:      s.l,
 	}
 }
 
 // RegisterGRPCServices registers schema management services to gRPC server.
 func (s *Server) RegisterGRPCServices(grpcServer *grpc.Server) {
-	schemav1.RegisterSchemaManagementServiceServer(grpcServer, s.SchemaManagementService())
-	schemav1.RegisterSchemaUpdateServiceServer(grpcServer, s.SchemaUpdateService())
-	s.l.Info().Msg("registered metadata property gRPC services")
+	grpcFactory := s.omr.With(metadataScope.SubScope("grpc"))
+	sm := newServerMetrics(grpcFactory)
+	schemav1.RegisterSchemaManagementServiceServer(grpcServer, &schemaManagementServer{
+		server:  s,
+		l:       s.l,
+		metrics: sm,
+	})
+	schemav1.RegisterSchemaUpdateServiceServer(grpcServer, &schemaUpdateServer{
+		server:  s,
+		l:       s.l,
+		metrics: sm,
+	})
 }
 
-// CreateSnapshot creates a snapshot of all metadata properties.
-func (s *Server) CreateSnapshot(ctx context.Context, name string) (string, error) {
-	return s.snapshotManager.CreateSnapshot(ctx, name)
-}
-
-// RestoreSnapshot restores metadata properties from a snapshot file.
-func (s *Server) RestoreSnapshot(ctx context.Context, path string) error {
-	return s.snapshotManager.RestoreSnapshot(ctx, path)
-}
-
-// insert inserts a schema property.
 func (s *Server) insert(ctx context.Context, prop *propertyv1.Property) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed.Load() {
+	if s.closer.Closed() {
 		return errors.New("server is closed")
 	}
-	id := property.GetPropertyID(prop)
-	return s.propertyService.DirectUpdate(ctx, prop.Metadata.Group, 0, id, prop)
+	return s.propertyService.DirectInsert(ctx, prop.Metadata.Group, 0, property.GetPropertyID(prop), prop)
 }
 
-// update updates a schema property.
 func (s *Server) update(ctx context.Context, prop *propertyv1.Property) error {
-	return s.insert(ctx, prop)
+	if s.closer.Closed() {
+		return errors.New("server is closed")
+	}
+	return s.propertyService.DirectUpdate(ctx, prop.Metadata.Group, 0, property.GetPropertyID(prop), prop)
 }
 
 // delete deletes a schema property.
-func (s *Server) delete(ctx context.Context, group, name, id string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed.Load() {
+func (s *Server) delete(ctx context.Context, group, name, id string, updateAt *timestamppb.Timestamp) (bool, error) {
+	if s.closer.Closed() {
 		return false, errors.New("server is closed")
 	}
 	prop, getErr := s.propertyService.DirectGet(ctx, group, name, id)
@@ -244,26 +173,32 @@ func (s *Server) delete(ctx context.Context, group, name, id string) (bool, erro
 	if prop == nil {
 		return false, nil
 	}
-	docID := property.GetPropertyID(prop)
-	deleteErr := s.propertyService.DirectDelete(ctx, [][]byte{docID})
+	// update the updated_at timestamp and tag before deletion
+	// so that the client can be detected deleted by queries using updated_at
+	for _, tag := range prop.Tags {
+		if tag.Key == TagKeyUpdatedAt {
+			tag.Value = &modelv1.TagValue{Value: &modelv1.TagValue_Int{Int: &modelv1.Int{Value: updateAt.AsTime().UnixNano()}}}
+			break
+		}
+	}
+	prop.UpdatedAt = updateAt
+	// update the property before deletion
+	if updateErr := s.propertyService.DirectUpdate(ctx, group, 0, property.GetPropertyID(prop), prop); updateErr != nil {
+		return false, updateErr
+	}
+	deleteErr := s.propertyService.DirectDelete(ctx, [][]byte{property.GetPropertyID(prop)})
 	return deleteErr == nil, deleteErr
 }
 
-// get retrieves a single schema property.
 func (s *Server) get(ctx context.Context, group, name, id string) (*propertyv1.Property, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.closed.Load() {
+	if s.closer.Closed() {
 		return nil, errors.New("server is closed")
 	}
 	return s.propertyService.DirectGet(ctx, group, name, id)
 }
 
-// list lists schema properties with delete time info.
-func (s *Server) list(ctx context.Context, req *propertyv1.QueryRequest) ([]*property.PropertyWithDeleteTime, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.closed.Load() {
+func (s *Server) list(ctx context.Context, req *propertyv1.QueryRequest) ([]*property.WithDeleteTime, error) {
+	if s.closer.Closed() {
 		return nil, errors.New("server is closed")
 	}
 	return s.propertyService.DirectQuery(ctx, req)

@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package etcd implements schema registry with etcd as the backend storage.
 package etcd
 
 import (
@@ -59,6 +60,9 @@ var (
 
 	errUnexpectedNumberOfEntities = errors.New("unexpected number of entities")
 	errConcurrentModification     = errors.New("concurrent modification of entities")
+
+	statusDataLoss  = status.New(codes.DataLoss, "banyandb: resource corrupts.")
+	errGRPCDataLoss = statusDataLoss.Err()
 )
 
 // RegistryOption is the option to create Registry.

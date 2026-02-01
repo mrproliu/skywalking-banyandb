@@ -24,12 +24,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 	"github.com/pkg/errors"
 	mvccpb "go.etcd.io/etcd/api/v3/mvccpb"
 	v3rpc "go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
 	"github.com/apache/skywalking-banyandb/pkg/convert"
 	"github.com/apache/skywalking-banyandb/pkg/logger"
 	"github.com/apache/skywalking-banyandb/pkg/run"
@@ -40,6 +40,7 @@ type watchEventHandler interface {
 	OnDelete(schema.Metadata)
 }
 
+// WatcherConfig holds the configuration for the watcher.
 type WatcherConfig struct {
 	key           string
 	revision      int64

@@ -27,6 +27,7 @@ import (
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/common/v1"
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
@@ -35,113 +36,73 @@ import (
 	schemav1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/schema/v1"
 	"github.com/apache/skywalking-banyandb/banyand/metadata/discovery/common"
 	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
-	"github.com/apache/skywalking-banyandb/pkg/convert"
+	"github.com/apache/skywalking-banyandb/banyand/observability"
 	"github.com/apache/skywalking-banyandb/pkg/grpchelper"
 	"github.com/apache/skywalking-banyandb/pkg/logger"
+	"github.com/apache/skywalking-banyandb/pkg/meter"
 	"github.com/apache/skywalking-banyandb/pkg/run"
 )
 
-const defaultSyncInterval = 30 * time.Second
-
 var errNoMetadataServers = errors.New("no metadata servers available")
 
-// cacheEntry stores cached schema information for change detection.
-type cacheEntry struct {
-	valueHash   uint64
-	modRevision int64
-	kind        schema.Kind
-	group       string
-	name        string
+type clientMetrics struct {
+	totalSyncStarted  meter.Counter
+	totalSyncFinished meter.Counter
+	totalSyncErr      meter.Counter
+	totalSyncLatency  meter.Counter
+	totalSyncUpdates  meter.Counter
+
+	totalQueryStarted  meter.Counter
+	totalQueryFinished meter.Counter
+	totalQueryErr      meter.Counter
+	totalQueryLatency  meter.Counter
+
+	totalRepairStarted  meter.Counter
+	totalRepairFinished meter.Counter
+	totalRepairNodes    meter.Counter
+
+	totalWriteStarted  meter.Counter
+	totalWriteFinished meter.Counter
+	totalWriteErr      meter.Counter
+	totalWriteLatency  meter.Counter
+
+	totalDeleteStarted  meter.Counter
+	totalDeleteFinished meter.Counter
+	totalDeleteErr      meter.Counter
+	totalDeleteLatency  meter.Counter
+
+	cacheSize meter.Gauge
 }
 
-// schemaCache manages local schema cache.
-type schemaCache struct {
-	entries     map[string]cacheEntry
-	maxRevision int64
-	mu          sync.RWMutex
-}
+func newClientMetrics(factory observability.Factory) *clientMetrics {
+	return &clientMetrics{
+		totalSyncStarted:  factory.NewCounter("property_sync_started"),
+		totalSyncFinished: factory.NewCounter("property_sync_finished"),
+		totalSyncErr:      factory.NewCounter("property_sync_err"),
+		totalSyncLatency:  factory.NewCounter("property_sync_latency"),
+		totalSyncUpdates:  factory.NewCounter("property_sync_updates"),
 
-func newSchemaCache() *schemaCache {
-	return &schemaCache{
-		entries: make(map[string]cacheEntry),
-	}
-}
+		totalQueryStarted:  factory.NewCounter("property_query_started", "method"),
+		totalQueryFinished: factory.NewCounter("property_query_finished", "method"),
+		totalQueryErr:      factory.NewCounter("property_query_err", "method"),
+		totalQueryLatency:  factory.NewCounter("property_query_latency", "method"),
 
-// Update updates the cache entry and returns true if it was changed.
-func (c *schemaCache) Update(propID string, entry cacheEntry) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	existing, exists := c.entries[propID]
-	if exists {
-		if existing.modRevision > entry.modRevision {
-			return false
-		}
-		if existing.modRevision == entry.modRevision && existing.valueHash == entry.valueHash {
-			return false
-		}
-	}
-	c.entries[propID] = entry
-	if entry.modRevision > c.maxRevision {
-		c.maxRevision = entry.modRevision
-	}
-	return true
-}
+		totalRepairStarted:  factory.NewCounter("property_repair_started"),
+		totalRepairFinished: factory.NewCounter("property_repair_finished"),
+		totalRepairNodes:    factory.NewCounter("property_repair_nodes"),
 
-// Delete removes an entry from the cache and returns true if it existed.
-func (c *schemaCache) Delete(propID string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, exists := c.entries[propID]; exists {
-		delete(c.entries, propID)
-		return true
-	}
-	return false
-}
+		totalWriteStarted:  factory.NewCounter("property_write_started", "kind", "group"),
+		totalWriteFinished: factory.NewCounter("property_write_finished", "kind", "group"),
+		totalWriteErr:      factory.NewCounter("property_write_err", "kind", "group"),
+		totalWriteLatency:  factory.NewCounter("property_write_latency", "kind", "group"),
 
-// GetMaxRevision returns the maximum revision seen.
-func (c *schemaCache) GetMaxRevision() int64 {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.maxRevision
-}
+		totalDeleteStarted:  factory.NewCounter("property_delete_started", "kind", "group"),
+		totalDeleteFinished: factory.NewCounter("property_delete_finished", "kind", "group"),
+		totalDeleteErr:      factory.NewCounter("property_delete_err", "kind", "group"),
+		totalDeleteLatency:  factory.NewCounter("property_delete_latency", "kind", "group"),
 
-// GetAllEntries returns a copy of all cache entries.
-func (c *schemaCache) GetAllEntries() map[string]cacheEntry {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	result := make(map[string]cacheEntry, len(c.entries))
-	for k, v := range c.entries {
-		result[k] = v
+		cacheSize: factory.NewGauge("property_cache_size"),
 	}
-	return result
-}
-
-// GetEntriesByKind returns entries matching the specified kind.
-func (c *schemaCache) GetEntriesByKind(kind schema.Kind) map[string]cacheEntry {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	result := make(map[string]cacheEntry)
-	for propID, entry := range c.entries {
-		if entry.kind == kind {
-			result[propID] = entry
-		}
-	}
-	return result
-}
-
-// GetCachedKinds returns the unique kinds that have cached entries.
-func (c *schemaCache) GetCachedKinds() []schema.Kind {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	kindSet := make(map[schema.Kind]struct{})
-	for _, entry := range c.entries {
-		kindSet[entry.kind] = struct{}{}
-	}
-	kinds := make([]schema.Kind, 0, len(kindSet))
-	for kind := range kindSet {
-		kinds = append(kinds, kind)
-	}
-	return kinds
 }
 
 // nodeConnection represents a connection to a metadata node.
@@ -160,6 +121,7 @@ type SchemaRegistry struct {
 	closer       *run.Closer
 	syncCloser   *run.Closer
 	l            *logger.Logger
+	metrics      *clientMetrics
 	mu           sync.RWMutex
 	connMu       sync.RWMutex
 	grpcTimeout  time.Duration
@@ -168,7 +130,7 @@ type SchemaRegistry struct {
 
 // NewSchemaRegistryClient creates a new property schema registry client.
 // It accepts a NodeDiscovery service to dynamically discover and connect to metadata nodes.
-func NewSchemaRegistryClient(dialOptsProvider common.GRPCDialOptionsProvider, grpcTimeout time.Duration) *SchemaRegistry {
+func NewSchemaRegistryClient(dialOptsProvider common.GRPCDialOptionsProvider, grpcTimeout, syncInterval time.Duration) *SchemaRegistry {
 	r := &SchemaRegistry{
 		dialOptsPrv:  dialOptsProvider,
 		nodeConns:    make(map[string]*nodeConnection),
@@ -177,21 +139,26 @@ func NewSchemaRegistryClient(dialOptsProvider common.GRPCDialOptionsProvider, gr
 		closer:       run.NewCloser(1),
 		l:            logger.GetLogger("property-schema-registry"),
 		grpcTimeout:  grpcTimeout,
-		syncInterval: defaultSyncInterval,
+		syncInterval: syncInterval,
 	}
 	return r
 }
 
-// SetSyncInterval sets the sync interval for polling. This should be called before StartWatcher.
-// This is primarily intended for testing purposes.
-func (r *SchemaRegistry) SetSyncInterval(interval time.Duration) {
-	r.syncInterval = interval
+// SetMetrics initializes the client metrics using the provided metrics registry.
+func (r *SchemaRegistry) SetMetrics(omr observability.MetricsRegistry) {
+	if omr == nil {
+		return
+	}
+	clientScope := metadataScope.SubScope("client")
+	r.metrics = newClientMetrics(omr.With(clientScope))
 }
 
+// OnInit implements schema.EventHandler.
 func (r *SchemaRegistry) OnInit(_ []schema.Kind) (bool, []int64) {
 	return false, nil
 }
 
+// OnAddOrUpdate implements schema.EventHandler for getting the all metadata nodes.
 func (r *SchemaRegistry) OnAddOrUpdate(m schema.Metadata) {
 	if m.Kind != schema.KindNode {
 		return
@@ -213,6 +180,7 @@ func (r *SchemaRegistry) OnAddOrUpdate(m schema.Metadata) {
 	r.addNodeConnection(node)
 }
 
+// OnDelete implements schema.EventHandler for getting which metadata node has been deleted.
 func (r *SchemaRegistry) OnDelete(m schema.Metadata) {
 	if m.Kind != schema.KindNode {
 		return
@@ -279,16 +247,6 @@ func (r *SchemaRegistry) removeNodeConnection(address string) {
 	r.l.Info().Str("address", address).Msg("disconnected from metadata node")
 }
 
-func (r *SchemaRegistry) getClients() []schemav1.SchemaManagementServiceClient {
-	r.connMu.RLock()
-	defer r.connMu.RUnlock()
-	clients := make([]schemav1.SchemaManagementServiceClient, 0, len(r.nodeConns))
-	for _, nc := range r.nodeConns {
-		clients = append(clients, nc.mgrClient)
-	}
-	return clients
-}
-
 // Close closes the registry.
 func (r *SchemaRegistry) Close() error {
 	r.closer.Done()
@@ -333,16 +291,12 @@ func (r *SchemaRegistry) RegisterHandler(name string, kind schema.Kind, handler 
 }
 
 // Register registers a metadata entry.
-func (r *SchemaRegistry) Register(ctx context.Context, metadata schema.Metadata, _ bool) error {
-	prop, convErr := SchemaToProperty(metadata.Kind, metadata.Spec.(proto.Message))
-	if convErr != nil {
-		return convErr
-	}
-	return r.insertToAllServers(ctx, prop)
+func (r *SchemaRegistry) Register(context.Context, schema.Metadata, bool) error {
+	panic("property based schema registry not support register")
 }
 
 // Compact is not supported in property mode.
-func (r *SchemaRegistry) Compact(_ context.Context, _ int64) error {
+func (r *SchemaRegistry) Compact(context.Context, int64) error {
 	return nil
 }
 
@@ -356,63 +310,28 @@ func (r *SchemaRegistry) StartWatcher() {
 
 // GetStream retrieves a stream by metadata.
 func (r *SchemaRegistry) GetStream(ctx context.Context, metadata *commonv1.Metadata) (*databasev1.Stream, error) {
-	prop, getErr := r.getSchema(ctx, schema.KindStream, metadata.GetGroup(), metadata.GetName())
-	if getErr != nil {
-		return nil, getErr
-	}
-	if prop == nil {
-		return nil, schema.ErrGRPCResourceNotFound
-	}
-	md, convErr := ToSchema(schema.KindStream, prop)
-	if convErr != nil {
-		return nil, convErr
-	}
-	return md.Spec.(*databasev1.Stream), nil
+	return getResource[*databasev1.Stream](ctx, r, schema.KindStream, metadata.GetGroup(), metadata.GetName())
 }
 
 // ListStream lists streams in a group.
 func (r *SchemaRegistry) ListStream(ctx context.Context, opt schema.ListOpt) ([]*databasev1.Stream, error) {
-	if opt.Group == "" {
-		return nil, schema.BadRequest("group", "group should not be empty")
-	}
-	props, listErr := r.listSchemas(ctx, schema.KindStream, opt.Group)
-	if listErr != nil {
-		return nil, listErr
-	}
-	streams := make([]*databasev1.Stream, 0, len(props))
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindStream, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to stream")
-			continue
-		}
-		streams = append(streams, md.Spec.(*databasev1.Stream))
-	}
-	return streams, nil
+	return listResources[*databasev1.Stream](ctx, r, schema.KindStream, opt.Group, true)
 }
 
 // CreateStream creates a new stream.
 func (r *SchemaRegistry) CreateStream(ctx context.Context, stream *databasev1.Stream) (int64, error) {
-	prop, convErr := SchemaToProperty(schema.KindStream, stream)
-	if convErr != nil {
-		return 0, convErr
-	}
-	if insertErr := r.insertToAllServers(ctx, prop); insertErr != nil {
-		return 0, insertErr
-	}
-	return time.Now().UnixNano(), nil
+	now := time.Now().UnixNano()
+	stream.Metadata.ModRevision = now
+	stream.UpdatedAt = timestamppb.Now()
+	return now, createResource(ctx, r, schema.KindStream, stream)
 }
 
 // UpdateStream updates an existing stream.
 func (r *SchemaRegistry) UpdateStream(ctx context.Context, stream *databasev1.Stream) (int64, error) {
-	prop, convErr := SchemaToProperty(schema.KindStream, stream)
-	if convErr != nil {
-		return 0, convErr
-	}
-	if updateErr := r.updateToAllServers(ctx, prop); updateErr != nil {
-		return 0, updateErr
-	}
-	return time.Now().UnixNano(), nil
+	now := time.Now().UnixNano()
+	stream.Metadata.ModRevision = now
+	stream.UpdatedAt = timestamppb.Now()
+	return now, updateResource(ctx, r, schema.KindStream, stream)
 }
 
 // DeleteStream deletes a stream.
@@ -424,63 +343,28 @@ func (r *SchemaRegistry) DeleteStream(ctx context.Context, metadata *commonv1.Me
 
 // GetMeasure retrieves a measure by metadata.
 func (r *SchemaRegistry) GetMeasure(ctx context.Context, metadata *commonv1.Metadata) (*databasev1.Measure, error) {
-	prop, getErr := r.getSchema(ctx, schema.KindMeasure, metadata.GetGroup(), metadata.GetName())
-	if getErr != nil {
-		return nil, getErr
-	}
-	if prop == nil {
-		return nil, schema.ErrGRPCResourceNotFound
-	}
-	md, convErr := ToSchema(schema.KindMeasure, prop)
-	if convErr != nil {
-		return nil, convErr
-	}
-	return md.Spec.(*databasev1.Measure), nil
+	return getResource[*databasev1.Measure](ctx, r, schema.KindMeasure, metadata.GetGroup(), metadata.GetName())
 }
 
 // ListMeasure lists measures in a group.
 func (r *SchemaRegistry) ListMeasure(ctx context.Context, opt schema.ListOpt) ([]*databasev1.Measure, error) {
-	if opt.Group == "" {
-		return nil, schema.BadRequest("group", "group should not be empty")
-	}
-	props, listErr := r.listSchemas(ctx, schema.KindMeasure, opt.Group)
-	if listErr != nil {
-		return nil, listErr
-	}
-	measures := make([]*databasev1.Measure, 0, len(props))
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindMeasure, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to measure")
-			continue
-		}
-		measures = append(measures, md.Spec.(*databasev1.Measure))
-	}
-	return measures, nil
+	return listResources[*databasev1.Measure](ctx, r, schema.KindMeasure, opt.Group, true)
 }
 
 // CreateMeasure creates a new measure.
 func (r *SchemaRegistry) CreateMeasure(ctx context.Context, measure *databasev1.Measure) (int64, error) {
-	prop, convErr := SchemaToProperty(schema.KindMeasure, measure)
-	if convErr != nil {
-		return 0, convErr
-	}
-	if insertErr := r.insertToAllServers(ctx, prop); insertErr != nil {
-		return 0, insertErr
-	}
-	return time.Now().UnixNano(), nil
+	now := time.Now().UnixNano()
+	measure.Metadata.ModRevision = now
+	measure.UpdatedAt = timestamppb.Now()
+	return now, createResource(ctx, r, schema.KindMeasure, measure)
 }
 
 // UpdateMeasure updates an existing measure.
 func (r *SchemaRegistry) UpdateMeasure(ctx context.Context, measure *databasev1.Measure) (int64, error) {
-	prop, convErr := SchemaToProperty(schema.KindMeasure, measure)
-	if convErr != nil {
-		return 0, convErr
-	}
-	if updateErr := r.updateToAllServers(ctx, prop); updateErr != nil {
-		return 0, updateErr
-	}
-	return time.Now().UnixNano(), nil
+	now := time.Now().UnixNano()
+	measure.Metadata.ModRevision = now
+	measure.UpdatedAt = timestamppb.Now()
+	return now, updateResource(ctx, r, schema.KindMeasure, measure)
 }
 
 // DeleteMeasure deletes a measure.
@@ -507,63 +391,28 @@ func (r *SchemaRegistry) TopNAggregations(ctx context.Context, metadata *commonv
 
 // GetTrace retrieves a trace by metadata.
 func (r *SchemaRegistry) GetTrace(ctx context.Context, metadata *commonv1.Metadata) (*databasev1.Trace, error) {
-	prop, getErr := r.getSchema(ctx, schema.KindTrace, metadata.GetGroup(), metadata.GetName())
-	if getErr != nil {
-		return nil, getErr
-	}
-	if prop == nil {
-		return nil, schema.ErrGRPCResourceNotFound
-	}
-	md, convErr := ToSchema(schema.KindTrace, prop)
-	if convErr != nil {
-		return nil, convErr
-	}
-	return md.Spec.(*databasev1.Trace), nil
+	return getResource[*databasev1.Trace](ctx, r, schema.KindTrace, metadata.GetGroup(), metadata.GetName())
 }
 
 // ListTrace lists traces in a group.
 func (r *SchemaRegistry) ListTrace(ctx context.Context, opt schema.ListOpt) ([]*databasev1.Trace, error) {
-	if opt.Group == "" {
-		return nil, schema.BadRequest("group", "group should not be empty")
-	}
-	props, listErr := r.listSchemas(ctx, schema.KindTrace, opt.Group)
-	if listErr != nil {
-		return nil, listErr
-	}
-	traces := make([]*databasev1.Trace, 0, len(props))
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindTrace, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to trace")
-			continue
-		}
-		traces = append(traces, md.Spec.(*databasev1.Trace))
-	}
-	return traces, nil
+	return listResources[*databasev1.Trace](ctx, r, schema.KindTrace, opt.Group, true)
 }
 
 // CreateTrace creates a new trace.
 func (r *SchemaRegistry) CreateTrace(ctx context.Context, trace *databasev1.Trace) (int64, error) {
-	prop, convErr := SchemaToProperty(schema.KindTrace, trace)
-	if convErr != nil {
-		return 0, convErr
-	}
-	if insertErr := r.insertToAllServers(ctx, prop); insertErr != nil {
-		return 0, insertErr
-	}
-	return time.Now().UnixNano(), nil
+	now := time.Now().UnixNano()
+	trace.Metadata.ModRevision = now
+	trace.UpdatedAt = timestamppb.Now()
+	return now, createResource(ctx, r, schema.KindTrace, trace)
 }
 
 // UpdateTrace updates an existing trace.
 func (r *SchemaRegistry) UpdateTrace(ctx context.Context, trace *databasev1.Trace) (int64, error) {
-	prop, convErr := SchemaToProperty(schema.KindTrace, trace)
-	if convErr != nil {
-		return 0, convErr
-	}
-	if updateErr := r.updateToAllServers(ctx, prop); updateErr != nil {
-		return 0, updateErr
-	}
-	return time.Now().UnixNano(), nil
+	now := time.Now().UnixNano()
+	trace.Metadata.ModRevision = now
+	trace.UpdatedAt = timestamppb.Now()
+	return now, updateResource(ctx, r, schema.KindTrace, trace)
 }
 
 // DeleteTrace deletes a trace.
@@ -575,54 +424,28 @@ func (r *SchemaRegistry) DeleteTrace(ctx context.Context, metadata *commonv1.Met
 
 // GetGroup retrieves a group by name.
 func (r *SchemaRegistry) GetGroup(ctx context.Context, group string) (*commonv1.Group, error) {
-	prop, getErr := r.getSchema(ctx, schema.KindGroup, "", group)
-	if getErr != nil {
-		return nil, getErr
-	}
-	if prop == nil {
-		return nil, schema.ErrGRPCResourceNotFound
-	}
-	md, convErr := ToSchema(schema.KindGroup, prop)
-	if convErr != nil {
-		return nil, convErr
-	}
-	return md.Spec.(*commonv1.Group), nil
+	return getResource[*commonv1.Group](ctx, r, schema.KindGroup, "", group)
 }
 
 // ListGroup lists all groups.
 func (r *SchemaRegistry) ListGroup(ctx context.Context) ([]*commonv1.Group, error) {
-	props, listErr := r.listSchemas(ctx, schema.KindGroup, "")
-	if listErr != nil {
-		return nil, listErr
-	}
-	groups := make([]*commonv1.Group, 0, len(props))
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindGroup, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to group")
-			continue
-		}
-		groups = append(groups, md.Spec.(*commonv1.Group))
-	}
-	return groups, nil
+	return listResources[*commonv1.Group](ctx, r, schema.KindGroup, "", false)
 }
 
 // CreateGroup creates a new group.
 func (r *SchemaRegistry) CreateGroup(ctx context.Context, group *commonv1.Group) error {
-	prop, convErr := SchemaToProperty(schema.KindGroup, group)
-	if convErr != nil {
-		return convErr
-	}
-	return r.insertToAllServers(ctx, prop)
+	now := time.Now().UnixNano()
+	group.Metadata.ModRevision = now
+	group.UpdatedAt = timestamppb.Now()
+	return createResource(ctx, r, schema.KindGroup, group)
 }
 
 // UpdateGroup updates an existing group.
 func (r *SchemaRegistry) UpdateGroup(ctx context.Context, group *commonv1.Group) error {
-	prop, convErr := SchemaToProperty(schema.KindGroup, group)
-	if convErr != nil {
-		return convErr
-	}
-	return r.updateToAllServers(ctx, prop)
+	now := time.Now().UnixNano()
+	group.Metadata.ModRevision = now
+	group.UpdatedAt = timestamppb.Now()
+	return updateResource(ctx, r, schema.KindGroup, group)
 }
 
 // DeleteGroup deletes a group.
@@ -634,57 +457,28 @@ func (r *SchemaRegistry) DeleteGroup(ctx context.Context, group string) (bool, e
 
 // GetIndexRule retrieves an index rule by metadata.
 func (r *SchemaRegistry) GetIndexRule(ctx context.Context, metadata *commonv1.Metadata) (*databasev1.IndexRule, error) {
-	prop, getErr := r.getSchema(ctx, schema.KindIndexRule, metadata.GetGroup(), metadata.GetName())
-	if getErr != nil {
-		return nil, getErr
-	}
-	if prop == nil {
-		return nil, schema.ErrGRPCResourceNotFound
-	}
-	md, convErr := ToSchema(schema.KindIndexRule, prop)
-	if convErr != nil {
-		return nil, convErr
-	}
-	return md.Spec.(*databasev1.IndexRule), nil
+	return getResource[*databasev1.IndexRule](ctx, r, schema.KindIndexRule, metadata.GetGroup(), metadata.GetName())
 }
 
 // ListIndexRule lists index rules in a group.
 func (r *SchemaRegistry) ListIndexRule(ctx context.Context, opt schema.ListOpt) ([]*databasev1.IndexRule, error) {
-	if opt.Group == "" {
-		return nil, schema.BadRequest("group", "group should not be empty")
-	}
-	props, listErr := r.listSchemas(ctx, schema.KindIndexRule, opt.Group)
-	if listErr != nil {
-		return nil, listErr
-	}
-	rules := make([]*databasev1.IndexRule, 0, len(props))
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindIndexRule, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to index rule")
-			continue
-		}
-		rules = append(rules, md.Spec.(*databasev1.IndexRule))
-	}
-	return rules, nil
+	return listResources[*databasev1.IndexRule](ctx, r, schema.KindIndexRule, opt.Group, true)
 }
 
 // CreateIndexRule creates a new index rule.
 func (r *SchemaRegistry) CreateIndexRule(ctx context.Context, indexRule *databasev1.IndexRule) error {
-	prop, convErr := SchemaToProperty(schema.KindIndexRule, indexRule)
-	if convErr != nil {
-		return convErr
-	}
-	return r.insertToAllServers(ctx, prop)
+	now := time.Now().UnixNano()
+	indexRule.Metadata.ModRevision = now
+	indexRule.UpdatedAt = timestamppb.Now()
+	return createResource(ctx, r, schema.KindIndexRule, indexRule)
 }
 
 // UpdateIndexRule updates an existing index rule.
 func (r *SchemaRegistry) UpdateIndexRule(ctx context.Context, indexRule *databasev1.IndexRule) error {
-	prop, convErr := SchemaToProperty(schema.KindIndexRule, indexRule)
-	if convErr != nil {
-		return convErr
-	}
-	return r.updateToAllServers(ctx, prop)
+	now := time.Now().UnixNano()
+	indexRule.Metadata.ModRevision = now
+	indexRule.UpdatedAt = timestamppb.Now()
+	return updateResource(ctx, r, schema.KindIndexRule, indexRule)
 }
 
 // DeleteIndexRule deletes an index rule.
@@ -696,57 +490,28 @@ func (r *SchemaRegistry) DeleteIndexRule(ctx context.Context, metadata *commonv1
 
 // GetIndexRuleBinding retrieves an index rule binding by metadata.
 func (r *SchemaRegistry) GetIndexRuleBinding(ctx context.Context, metadata *commonv1.Metadata) (*databasev1.IndexRuleBinding, error) {
-	prop, getErr := r.getSchema(ctx, schema.KindIndexRuleBinding, metadata.GetGroup(), metadata.GetName())
-	if getErr != nil {
-		return nil, getErr
-	}
-	if prop == nil {
-		return nil, schema.ErrGRPCResourceNotFound
-	}
-	md, convErr := ToSchema(schema.KindIndexRuleBinding, prop)
-	if convErr != nil {
-		return nil, convErr
-	}
-	return md.Spec.(*databasev1.IndexRuleBinding), nil
+	return getResource[*databasev1.IndexRuleBinding](ctx, r, schema.KindIndexRuleBinding, metadata.GetGroup(), metadata.GetName())
 }
 
 // ListIndexRuleBinding lists index rule bindings in a group.
 func (r *SchemaRegistry) ListIndexRuleBinding(ctx context.Context, opt schema.ListOpt) ([]*databasev1.IndexRuleBinding, error) {
-	if opt.Group == "" {
-		return nil, schema.BadRequest("group", "group should not be empty")
-	}
-	props, listErr := r.listSchemas(ctx, schema.KindIndexRuleBinding, opt.Group)
-	if listErr != nil {
-		return nil, listErr
-	}
-	bindings := make([]*databasev1.IndexRuleBinding, 0, len(props))
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindIndexRuleBinding, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to index rule binding")
-			continue
-		}
-		bindings = append(bindings, md.Spec.(*databasev1.IndexRuleBinding))
-	}
-	return bindings, nil
+	return listResources[*databasev1.IndexRuleBinding](ctx, r, schema.KindIndexRuleBinding, opt.Group, true)
 }
 
 // CreateIndexRuleBinding creates a new index rule binding.
 func (r *SchemaRegistry) CreateIndexRuleBinding(ctx context.Context, indexRuleBinding *databasev1.IndexRuleBinding) error {
-	prop, convErr := SchemaToProperty(schema.KindIndexRuleBinding, indexRuleBinding)
-	if convErr != nil {
-		return convErr
-	}
-	return r.insertToAllServers(ctx, prop)
+	now := time.Now().UnixNano()
+	indexRuleBinding.Metadata.ModRevision = now
+	indexRuleBinding.UpdatedAt = timestamppb.Now()
+	return createResource(ctx, r, schema.KindIndexRuleBinding, indexRuleBinding)
 }
 
 // UpdateIndexRuleBinding updates an existing index rule binding.
 func (r *SchemaRegistry) UpdateIndexRuleBinding(ctx context.Context, indexRuleBinding *databasev1.IndexRuleBinding) error {
-	prop, convErr := SchemaToProperty(schema.KindIndexRuleBinding, indexRuleBinding)
-	if convErr != nil {
-		return convErr
-	}
-	return r.updateToAllServers(ctx, prop)
+	now := time.Now().UnixNano()
+	indexRuleBinding.Metadata.ModRevision = now
+	indexRuleBinding.UpdatedAt = timestamppb.Now()
+	return updateResource(ctx, r, schema.KindIndexRuleBinding, indexRuleBinding)
 }
 
 // DeleteIndexRuleBinding deletes an index rule binding.
@@ -758,57 +523,28 @@ func (r *SchemaRegistry) DeleteIndexRuleBinding(ctx context.Context, metadata *c
 
 // GetTopNAggregation retrieves a top-N aggregation by metadata.
 func (r *SchemaRegistry) GetTopNAggregation(ctx context.Context, metadata *commonv1.Metadata) (*databasev1.TopNAggregation, error) {
-	prop, getErr := r.getSchema(ctx, schema.KindTopNAggregation, metadata.GetGroup(), metadata.GetName())
-	if getErr != nil {
-		return nil, getErr
-	}
-	if prop == nil {
-		return nil, schema.ErrGRPCResourceNotFound
-	}
-	md, convErr := ToSchema(schema.KindTopNAggregation, prop)
-	if convErr != nil {
-		return nil, convErr
-	}
-	return md.Spec.(*databasev1.TopNAggregation), nil
+	return getResource[*databasev1.TopNAggregation](ctx, r, schema.KindTopNAggregation, metadata.GetGroup(), metadata.GetName())
 }
 
 // ListTopNAggregation lists top-N aggregations in a group.
 func (r *SchemaRegistry) ListTopNAggregation(ctx context.Context, opt schema.ListOpt) ([]*databasev1.TopNAggregation, error) {
-	if opt.Group == "" {
-		return nil, schema.BadRequest("group", "group should not be empty")
-	}
-	props, listErr := r.listSchemas(ctx, schema.KindTopNAggregation, opt.Group)
-	if listErr != nil {
-		return nil, listErr
-	}
-	aggregations := make([]*databasev1.TopNAggregation, 0, len(props))
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindTopNAggregation, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to top-N aggregation")
-			continue
-		}
-		aggregations = append(aggregations, md.Spec.(*databasev1.TopNAggregation))
-	}
-	return aggregations, nil
+	return listResources[*databasev1.TopNAggregation](ctx, r, schema.KindTopNAggregation, opt.Group, true)
 }
 
 // CreateTopNAggregation creates a new top-N aggregation.
 func (r *SchemaRegistry) CreateTopNAggregation(ctx context.Context, topN *databasev1.TopNAggregation) error {
-	prop, convErr := SchemaToProperty(schema.KindTopNAggregation, topN)
-	if convErr != nil {
-		return convErr
-	}
-	return r.insertToAllServers(ctx, prop)
+	now := time.Now().UnixNano()
+	topN.Metadata.ModRevision = now
+	topN.UpdatedAt = timestamppb.Now()
+	return createResource(ctx, r, schema.KindTopNAggregation, topN)
 }
 
 // UpdateTopNAggregation updates an existing top-N aggregation.
 func (r *SchemaRegistry) UpdateTopNAggregation(ctx context.Context, topN *databasev1.TopNAggregation) error {
-	prop, convErr := SchemaToProperty(schema.KindTopNAggregation, topN)
-	if convErr != nil {
-		return convErr
-	}
-	return r.updateToAllServers(ctx, prop)
+	now := time.Now().UnixNano()
+	topN.Metadata.ModRevision = now
+	topN.UpdatedAt = timestamppb.Now()
+	return updateResource(ctx, r, schema.KindTopNAggregation, topN)
 }
 
 // DeleteTopNAggregation deletes a top-N aggregation.
@@ -819,121 +555,51 @@ func (r *SchemaRegistry) DeleteTopNAggregation(ctx context.Context, metadata *co
 // Node methods.
 
 // ListNode lists nodes by role.
-func (r *SchemaRegistry) ListNode(ctx context.Context, role databasev1.Role) ([]*databasev1.Node, error) {
-	if role == databasev1.Role_ROLE_UNSPECIFIED {
-		return nil, schema.BadRequest("role", "role should not be unspecified")
-	}
-	props, listErr := r.listSchemas(ctx, schema.KindNode, "")
-	if listErr != nil {
-		return nil, listErr
-	}
-	nodes := make([]*databasev1.Node, 0, len(props))
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindNode, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to node")
-			continue
-		}
-		node := md.Spec.(*databasev1.Node)
-		for _, nodeRole := range node.Roles {
-			if nodeRole == role {
-				nodes = append(nodes, node)
-				break
-			}
-		}
-	}
-	return nodes, nil
+func (r *SchemaRegistry) ListNode(context.Context, databasev1.Role) ([]*databasev1.Node, error) {
+	panic("property based schema registry does not support list node")
 }
 
 // RegisterNode registers a node.
-func (r *SchemaRegistry) RegisterNode(ctx context.Context, node *databasev1.Node, _ bool) error {
-	prop, convErr := SchemaToProperty(schema.KindNode, node)
-	if convErr != nil {
-		return convErr
-	}
-	return r.insertToAllServers(ctx, prop)
+func (r *SchemaRegistry) RegisterNode(context.Context, *databasev1.Node, bool) error {
+	panic("property based schema registry does not support register node")
 }
 
 // GetNode retrieves a node by name.
-func (r *SchemaRegistry) GetNode(ctx context.Context, node string) (*databasev1.Node, error) {
-	prop, getErr := r.getSchema(ctx, schema.KindNode, "", node)
-	if getErr != nil {
-		return nil, getErr
-	}
-	if prop == nil {
-		return nil, schema.ErrGRPCResourceNotFound
-	}
-	md, convErr := ToSchema(schema.KindNode, prop)
-	if convErr != nil {
-		return nil, convErr
-	}
-	return md.Spec.(*databasev1.Node), nil
+func (r *SchemaRegistry) GetNode(context.Context, string) (*databasev1.Node, error) {
+	panic("property based schema registry does not support get node")
 }
 
 // UpdateNode updates a node.
-func (r *SchemaRegistry) UpdateNode(ctx context.Context, node *databasev1.Node) error {
-	prop, convErr := SchemaToProperty(schema.KindNode, node)
-	if convErr != nil {
-		return convErr
-	}
-	return r.updateToAllServers(ctx, prop)
+func (r *SchemaRegistry) UpdateNode(context.Context, *databasev1.Node) error {
+	panic("property based schema registry does not support update node")
 }
 
 // Property methods.
 
 // GetProperty retrieves a property by metadata.
 func (r *SchemaRegistry) GetProperty(ctx context.Context, metadata *commonv1.Metadata) (*databasev1.Property, error) {
-	prop, getErr := r.getSchema(ctx, schema.KindProperty, metadata.GetGroup(), metadata.GetName())
-	if getErr != nil {
-		return nil, getErr
-	}
-	if prop == nil {
-		return nil, schema.ErrGRPCResourceNotFound
-	}
-	md, convErr := ToSchema(schema.KindProperty, prop)
-	if convErr != nil {
-		return nil, convErr
-	}
-	return md.Spec.(*databasev1.Property), nil
+	return getResource[*databasev1.Property](ctx, r, schema.KindProperty, metadata.GetGroup(), metadata.GetName())
 }
 
 // ListProperty lists properties in a group.
 func (r *SchemaRegistry) ListProperty(ctx context.Context, opt schema.ListOpt) ([]*databasev1.Property, error) {
-	if opt.Group == "" {
-		return nil, schema.BadRequest("group", "group should not be empty")
-	}
-	props, listErr := r.listSchemas(ctx, schema.KindProperty, opt.Group)
-	if listErr != nil {
-		return nil, listErr
-	}
-	properties := make([]*databasev1.Property, 0, len(props))
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindProperty, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to database property")
-			continue
-		}
-		properties = append(properties, md.Spec.(*databasev1.Property))
-	}
-	return properties, nil
+	return listResources[*databasev1.Property](ctx, r, schema.KindProperty, opt.Group, true)
 }
 
 // CreateProperty creates a new property.
 func (r *SchemaRegistry) CreateProperty(ctx context.Context, property *databasev1.Property) error {
-	prop, convErr := SchemaToProperty(schema.KindProperty, property)
-	if convErr != nil {
-		return convErr
-	}
-	return r.insertToAllServers(ctx, prop)
+	now := time.Now().UnixNano()
+	property.Metadata.ModRevision = now
+	property.UpdatedAt = timestamppb.Now()
+	return createResource(ctx, r, schema.KindProperty, property)
 }
 
 // UpdateProperty updates an existing property.
 func (r *SchemaRegistry) UpdateProperty(ctx context.Context, property *databasev1.Property) error {
-	prop, convErr := SchemaToProperty(schema.KindProperty, property)
-	if convErr != nil {
-		return convErr
-	}
-	return r.updateToAllServers(ctx, prop)
+	now := time.Now().UnixNano()
+	property.Metadata.ModRevision = now
+	property.UpdatedAt = timestamppb.Now()
+	return updateResource(ctx, r, schema.KindProperty, property)
 }
 
 // DeleteProperty deletes a property.
@@ -941,86 +607,138 @@ func (r *SchemaRegistry) DeleteProperty(ctx context.Context, metadata *commonv1.
 	return r.deleteFromAllServers(ctx, schema.KindProperty, metadata.GetGroup(), metadata.GetName())
 }
 
-// Internal helper methods.
-
-func (r *SchemaRegistry) getSchema(ctx context.Context, kind schema.Kind, group, name string) (*propertyv1.Property, error) {
-	clients := r.getClients()
-	if len(clients) == 0 {
-		return nil, errNoMetadataServers
-	}
-	propID := BuildPropertyID(kind, &commonv1.Metadata{Group: group, Name: name})
-	req := &schemav1.GetSchemaRequest{
-		Query: &propertyv1.QueryRequest{
-			Groups: []string{SchemaGroup},
-			Name:   kind.String(),
-			Ids:    []string{propID},
-		},
-	}
-	resp, getErr := clients[0].GetSchema(ctx, req)
+func getResource[T proto.Message](ctx context.Context, r *SchemaRegistry, kind schema.Kind, group, name string) (T, error) {
+	var zero T
+	prop, getErr := r.getSchema(ctx, kind, group, name)
 	if getErr != nil {
-		return nil, getErr
+		return zero, getErr
 	}
-	return resp.Properties, nil
+	if prop == nil {
+		return zero, schema.ErrGRPCResourceNotFound
+	}
+	md, convErr := ToSchema(kind, prop)
+	if convErr != nil {
+		return zero, convErr
+	}
+	result, ok := md.Spec.(T)
+	if !ok {
+		return zero, errors.Errorf("unexpected spec type for kind %s", kind)
+	}
+	return result, nil
 }
 
-// schemaWithDeleteTime holds a property with its delete time for cross-node sync.
+func listResources[T proto.Message](ctx context.Context, r *SchemaRegistry, kind schema.Kind, group string, requireGroup bool) ([]T, error) {
+	if requireGroup && group == "" {
+		return nil, schema.BadRequest("group", "group should not be empty")
+	}
+	props, listErr := r.listSchemas(ctx, kind, group)
+	if listErr != nil {
+		return nil, listErr
+	}
+	results := make([]T, 0, len(props))
+	for _, prop := range props {
+		md, convErr := ToSchema(kind, prop)
+		if convErr != nil {
+			r.l.Warn().Err(convErr).Stringer("kind", kind).Msg("failed to convert property")
+			continue
+		}
+		result, ok := md.Spec.(T)
+		if !ok {
+			r.l.Warn().Stringer("kind", kind).Msg("unexpected spec type")
+			continue
+		}
+		results = append(results, result)
+	}
+	return results, nil
+}
+
+func initResourceFromClient[T proto.Message](ctx context.Context, r *SchemaRegistry, client schemav1.SchemaManagementServiceClient,
+	kind schema.Kind, group string, maxRevision *int64,
+) {
+	props, listErr := r.listSchemasFromClient(ctx, client, kind, group)
+	if listErr != nil {
+		r.l.Warn().Err(listErr).Str("group", group).Msg("failed to list streams")
+		return
+	}
+	for _, prop := range props {
+		md, convErr := ToSchema(kind, prop)
+		if convErr != nil {
+			r.l.Warn().Err(convErr).Msgf("failed to convert property to %s", kind)
+			continue
+		}
+		*maxRevision = r.processInitialResource(kind, md.Spec.(T), *maxRevision)
+	}
+}
+
+func createResource[T proto.Message](ctx context.Context, r *SchemaRegistry, kind schema.Kind, spec T) error {
+	metadata, err := getMetadataFromSpec(kind, spec)
+	if err != nil {
+		return err
+	}
+	originalSchema, err := r.getSchema(ctx, kind, metadata.Group, metadata.Name)
+	if err != nil {
+		return err
+	}
+	if originalSchema != nil {
+		return fmt.Errorf("schema %s/%s already exist", metadata.Group, metadata.Name)
+	}
+	prop, convErr := SchemaToProperty(kind, spec)
+	if convErr != nil {
+		return convErr
+	}
+	return r.insertToAllServers(ctx, prop)
+}
+
+func updateResource[T proto.Message](ctx context.Context, r *SchemaRegistry, kind schema.Kind, spec T) error {
+	metadata, err := getMetadataFromSpec(kind, spec)
+	if err != nil {
+		return err
+	}
+	originalSchema, err := r.getSchema(ctx, kind, metadata.Group, metadata.Name)
+	if err != nil {
+		return err
+	}
+	if originalSchema == nil {
+		return fmt.Errorf("schema %s/%s not exist", metadata.Group, metadata.Name)
+	}
+	prop, convErr := SchemaToProperty(kind, spec)
+	if convErr != nil {
+		return convErr
+	}
+	return r.updateToAllServers(ctx, prop)
+}
+
+func (r *SchemaRegistry) getSchema(ctx context.Context, kind schema.Kind, group, name string) (*propertyv1.Property, error) {
+	propID := BuildPropertyID(kind, &commonv1.Metadata{Group: group, Name: name})
+	query := buildSchemaQuery(kind, group, []string{propID})
+	propMap, queryErr := r.queryAndRepairSchemas(ctx, query)
+	if queryErr != nil {
+		return nil, queryErr
+	}
+	info := propMap[propID]
+	if info == nil || info.best == nil || info.best.deleteTime > 0 {
+		return nil, nil
+	}
+	return info.best.property, nil
+}
+
 type schemaWithDeleteTime struct {
 	property   *propertyv1.Property
 	deleteTime int64
 }
 
-// propInfo tracks the best schema and node-specific state for aggregation.
 type propInfo struct {
 	nodeRev     map[string]int64
 	nodeDelTime map[string]int64
 	best        *schemaWithDeleteTime
-	bestAddr    string
 }
 
 func (r *SchemaRegistry) listSchemas(ctx context.Context, kind schema.Kind, group string) ([]*propertyv1.Property, error) {
-	nodeConns := r.getNodeConnectionsWithAddr()
-	if len(nodeConns) == 0 {
-		return nil, errNoMetadataServers
+	query := buildSchemaQuery(kind, group, nil)
+	propMap, queryErr := r.queryAndRepairSchemas(ctx, query)
+	if queryErr != nil {
+		return nil, queryErr
 	}
-	type nodeResult struct {
-		schemas []*schemaWithDeleteTime
-		err     error
-		addr    string
-	}
-	resultCh := make(chan nodeResult, len(nodeConns))
-	for addr, nc := range nodeConns {
-		go func(address string, client schemav1.SchemaManagementServiceClient) {
-			schemas, queryErr := r.listSchemasFromClientWithDeleteTime(ctx, client, kind, group)
-			resultCh <- nodeResult{addr: address, schemas: schemas, err: queryErr}
-		}(addr, nc.mgrClient)
-	}
-	propMap := make(map[string]*propInfo)
-	for range len(nodeConns) {
-		res := <-resultCh
-		if res.err != nil {
-			r.l.Warn().Err(res.err).Str("node", res.addr).Msg("failed to query node")
-			continue
-		}
-		for _, s := range res.schemas {
-			propID := s.property.Id
-			rev := s.property.Metadata.GetModRevision()
-			info, exists := propMap[propID]
-			if !exists {
-				info = &propInfo{
-					nodeRev:     make(map[string]int64),
-					nodeDelTime: make(map[string]int64),
-				}
-				propMap[propID] = info
-			}
-			info.nodeRev[res.addr] = rev
-			info.nodeDelTime[res.addr] = s.deleteTime
-			if info.best == nil || rev > info.best.property.Metadata.GetModRevision() {
-				info.best = s
-				info.bestAddr = res.addr
-			}
-		}
-	}
-	r.repairInconsistentNodes(ctx, nodeConns, propMap)
 	result := make([]*propertyv1.Property, 0, len(propMap))
 	for _, info := range propMap {
 		if info.best != nil && info.best.deleteTime == 0 {
@@ -1040,17 +758,10 @@ func (r *SchemaRegistry) getNodeConnectionsWithAddr() map[string]*nodeConnection
 	return result
 }
 
-func (r *SchemaRegistry) listSchemasFromClientWithDeleteTime(ctx context.Context, client schemav1.SchemaManagementServiceClient,
-	kind schema.Kind, group string,
+func (r *SchemaRegistry) querySchemasFromClient(ctx context.Context, client schemav1.SchemaManagementServiceClient,
+	query *propertyv1.QueryRequest,
 ) ([]*schemaWithDeleteTime, error) {
-	req := &schemav1.ListSchemasRequest{
-		Query: &propertyv1.QueryRequest{
-			Groups: []string{SchemaGroup},
-			Name:   kind.String(),
-			Limit:  10000,
-		},
-	}
-	resp, listErr := client.ListSchemas(ctx, req)
+	resp, listErr := client.ListSchemas(ctx, &schemav1.ListSchemasRequest{Query: query})
 	if listErr != nil {
 		return nil, listErr
 	}
@@ -1060,12 +771,6 @@ func (r *SchemaRegistry) listSchemasFromClientWithDeleteTime(ctx context.Context
 		if idx < len(resp.DeleteTimes) {
 			deleteTime = resp.DeleteTimes[idx]
 		}
-		if group != "" {
-			propGroup := getGroupFromTags(prop.Tags)
-			if propGroup != group {
-				continue
-			}
-		}
 		results = append(results, &schemaWithDeleteTime{
 			property:   prop,
 			deleteTime: deleteTime,
@@ -1074,12 +779,105 @@ func (r *SchemaRegistry) listSchemasFromClientWithDeleteTime(ctx context.Context
 	return results, nil
 }
 
+func buildSchemaQuery(kind schema.Kind, group string, ids []string) *propertyv1.QueryRequest {
+	query := &propertyv1.QueryRequest{
+		Groups: []string{SchemaGroup},
+		Name:   kind.String(),
+		Ids:    ids,
+		Limit:  10000,
+	}
+	if group != "" {
+		query.Criteria = &modelv1.Criteria{
+			Exp: &modelv1.Criteria_Condition{
+				Condition: &modelv1.Condition{
+					Name: TagKeyGroup,
+					Op:   modelv1.Condition_BINARY_OP_EQ,
+					Value: &modelv1.TagValue{
+						Value: &modelv1.TagValue_Str{Str: &modelv1.Str{Value: group}},
+					},
+				},
+			},
+		}
+	}
+	return query
+}
+
+type schemaQueryNodeResult struct {
+	err     error
+	addr    string
+	schemas []*schemaWithDeleteTime
+}
+
+func (r *SchemaRegistry) queryAndRepairSchemas(ctx context.Context, query *propertyv1.QueryRequest) (map[string]*propInfo, error) {
+	if r.metrics != nil {
+		r.metrics.totalQueryStarted.Inc(1, "list")
+	}
+	start := time.Now()
+	defer func() {
+		if r.metrics != nil {
+			r.metrics.totalQueryFinished.Inc(1, "list")
+			r.metrics.totalQueryLatency.Inc(time.Since(start).Seconds(), "list")
+		}
+	}()
+	nodeConns := r.getNodeConnectionsWithAddr()
+	if len(nodeConns) == 0 {
+		if r.metrics != nil {
+			r.metrics.totalQueryErr.Inc(1, "list")
+		}
+		return nil, errNoMetadataServers
+	}
+	resultCh := make(chan schemaQueryNodeResult, len(nodeConns))
+	for addr, nc := range nodeConns {
+		go func(address string, client schemav1.SchemaManagementServiceClient) {
+			schemas, queryErr := r.querySchemasFromClient(ctx, client, query)
+			resultCh <- schemaQueryNodeResult{addr: address, schemas: schemas, err: queryErr}
+		}(addr, nc.mgrClient)
+	}
+	propMap := make(map[string]*propInfo)
+	for range len(nodeConns) {
+		res := <-resultCh
+		if res.err != nil {
+			r.l.Warn().Err(res.err).Str("node", res.addr).Msg("failed to query node")
+			continue
+		}
+		for _, s := range res.schemas {
+			propID := s.property.Id
+			rev := s.property.UpdatedAt.AsTime().UnixNano()
+			info, exists := propMap[propID]
+			if !exists {
+				info = &propInfo{
+					nodeRev:     make(map[string]int64),
+					nodeDelTime: make(map[string]int64),
+				}
+				propMap[propID] = info
+			}
+			if existingRev, ok := info.nodeRev[res.addr]; !ok || rev > existingRev {
+				info.nodeRev[res.addr] = rev
+				info.nodeDelTime[res.addr] = s.deleteTime
+			}
+			if info.best == nil || info.best.property.UpdatedAt.AsTime().UnixNano() < rev {
+				info.best = s
+			}
+		}
+	}
+	r.repairInconsistentNodes(ctx, nodeConns, propMap)
+	return propMap, nil
+}
+
 func (r *SchemaRegistry) repairInconsistentNodes(ctx context.Context, nodeConns map[string]*nodeConnection, propMap map[string]*propInfo) {
+	if r.metrics != nil {
+		r.metrics.totalRepairStarted.Inc(1)
+	}
+	defer func() {
+		if r.metrics != nil {
+			r.metrics.totalRepairFinished.Inc(1)
+		}
+	}()
 	for propID, info := range propMap {
 		if info.best == nil {
 			continue
 		}
-		bestRev := info.best.property.Metadata.GetModRevision()
+		bestRev := info.best.property.UpdatedAt.AsTime().UnixNano()
 		var nodesToRepair []string
 		for addr := range nodeConns {
 			nodeRev, exists := info.nodeRev[addr]
@@ -1089,6 +887,9 @@ func (r *SchemaRegistry) repairInconsistentNodes(ctx context.Context, nodeConns 
 		}
 		if len(nodesToRepair) == 0 {
 			continue
+		}
+		if r.metrics != nil {
+			r.metrics.totalRepairNodes.Inc(float64(len(nodesToRepair)))
 		}
 		r.l.Info().Str("propID", propID).Int64("bestRev", bestRev).
 			Int64("deleteTime", info.best.deleteTime).
@@ -1115,8 +916,22 @@ func (r *SchemaRegistry) repairInconsistentNodes(ctx context.Context, nodeConns 
 }
 
 func (r *SchemaRegistry) insertToAllServers(ctx context.Context, prop *propertyv1.Property) error {
+	kind, group := extractKindAndGroupFromProperty(prop)
+	if r.metrics != nil {
+		r.metrics.totalWriteStarted.Inc(1, kind, group)
+	}
+	start := time.Now()
+	defer func() {
+		if r.metrics != nil {
+			r.metrics.totalWriteFinished.Inc(1, kind, group)
+			r.metrics.totalWriteLatency.Inc(time.Since(start).Seconds(), kind, group)
+		}
+	}()
 	clients := r.getClients()
 	if len(clients) == 0 {
+		if r.metrics != nil {
+			r.metrics.totalWriteErr.Inc(1, kind, group)
+		}
 		return errNoMetadataServers
 	}
 	var firstErr error
@@ -1134,15 +949,32 @@ func (r *SchemaRegistry) insertToAllServers(ctx context.Context, prop *propertyv
 				}
 				mu.Unlock()
 			}
-		}(client)
+		}(client.mgrClient)
 	}
 	wg.Wait()
+	if firstErr != nil && r.metrics != nil {
+		r.metrics.totalWriteErr.Inc(1, kind, group)
+	}
 	return firstErr
 }
 
 func (r *SchemaRegistry) updateToAllServers(ctx context.Context, prop *propertyv1.Property) error {
+	kind, group := extractKindAndGroupFromProperty(prop)
+	if r.metrics != nil {
+		r.metrics.totalWriteStarted.Inc(1, kind, group)
+	}
+	start := time.Now()
+	defer func() {
+		if r.metrics != nil {
+			r.metrics.totalWriteFinished.Inc(1, kind, group)
+			r.metrics.totalWriteLatency.Inc(time.Since(start).Seconds(), kind, group)
+		}
+	}()
 	clients := r.getClients()
 	if len(clients) == 0 {
+		if r.metrics != nil {
+			r.metrics.totalWriteErr.Inc(1, kind, group)
+		}
 		return errNoMetadataServers
 	}
 	var firstErr error
@@ -1160,15 +992,32 @@ func (r *SchemaRegistry) updateToAllServers(ctx context.Context, prop *propertyv
 				}
 				mu.Unlock()
 			}
-		}(client)
+		}(client.mgrClient)
 	}
 	wg.Wait()
+	if firstErr != nil && r.metrics != nil {
+		r.metrics.totalWriteErr.Inc(1, kind, group)
+	}
 	return firstErr
 }
 
 func (r *SchemaRegistry) deleteFromAllServers(ctx context.Context, kind schema.Kind, group, name string) (bool, error) {
+	kindStr := kind.String()
+	if r.metrics != nil {
+		r.metrics.totalDeleteStarted.Inc(1, kindStr, group)
+	}
+	start := time.Now()
+	defer func() {
+		if r.metrics != nil {
+			r.metrics.totalDeleteFinished.Inc(1, kindStr, group)
+			r.metrics.totalDeleteLatency.Inc(time.Since(start).Seconds(), kindStr, group)
+		}
+	}()
 	clients := r.getClients()
 	if len(clients) == 0 {
+		if r.metrics != nil {
+			r.metrics.totalDeleteErr.Inc(1, kindStr, group)
+		}
 		return false, errNoMetadataServers
 	}
 	propID := BuildPropertyID(kind, &commonv1.Metadata{Group: group, Name: name})
@@ -1186,6 +1035,8 @@ func (r *SchemaRegistry) deleteFromAllServers(ctx context.Context, kind schema.K
 					Name:  kind.String(),
 					Id:    propID,
 				},
+				// update the latest update time for the notification
+				UpdateAt: timestamppb.Now(),
 			})
 			mu.Lock()
 			if callErr != nil && firstErr == nil {
@@ -1195,9 +1046,12 @@ func (r *SchemaRegistry) deleteFromAllServers(ctx context.Context, kind schema.K
 				found = true
 			}
 			mu.Unlock()
-		}(client)
+		}(client.mgrClient)
 	}
 	wg.Wait()
+	if firstErr != nil && r.metrics != nil {
+		r.metrics.totalDeleteErr.Inc(1, kindStr, group)
+	}
 	return found, firstErr
 }
 
@@ -1212,98 +1066,30 @@ func (r *SchemaRegistry) initializeFromNode(nodeConn *nodeConnection) {
 	}
 	var maxRevision int64
 	for _, group := range groups {
+		// init group
 		maxRevision = r.processInitialResource(schema.KindGroup, group, maxRevision)
-	}
-	for _, group := range groups {
+
+		// init related resources
 		groupName := group.GetMetadata().GetName()
 		catalog := group.GetCatalog()
 		switch catalog {
 		case commonv1.Catalog_CATALOG_STREAM:
-			r.initializeStreamResourcesFromClient(ctx, nodeConn.mgrClient, groupName, &maxRevision)
+			initResourceFromClient[*databasev1.Stream](ctx, r, nodeConn.mgrClient, schema.KindStream, groupName, &maxRevision)
 		case commonv1.Catalog_CATALOG_MEASURE:
-			r.initializeMeasureResourcesFromClient(ctx, nodeConn.mgrClient, groupName, &maxRevision)
+			initResourceFromClient[*databasev1.Measure](ctx, r, nodeConn.mgrClient, schema.KindMeasure, groupName, &maxRevision)
+			initResourceFromClient[*databasev1.TopNAggregation](ctx, r, nodeConn.mgrClient, schema.KindTopNAggregation, groupName, &maxRevision)
 		case commonv1.Catalog_CATALOG_TRACE:
-			r.initializeTraceResourcesFromClient(ctx, nodeConn.mgrClient, groupName, &maxRevision)
+			initResourceFromClient[*databasev1.Trace](ctx, r, nodeConn.mgrClient, schema.KindTrace, groupName, &maxRevision)
 		case commonv1.Catalog_CATALOG_PROPERTY:
-			r.initializePropertyResourcesFromClient(ctx, nodeConn.mgrClient, groupName, &maxRevision)
+			initResourceFromClient[*databasev1.Property](ctx, r, nodeConn.mgrClient, schema.KindProperty, groupName, &maxRevision)
 		}
 		if catalog != commonv1.Catalog_CATALOG_PROPERTY {
-			r.initializeIndexResourcesFromClient(ctx, nodeConn.mgrClient, groupName, &maxRevision)
+			initResourceFromClient[*databasev1.IndexRule](ctx, r, nodeConn.mgrClient, schema.KindIndexRule, groupName, &maxRevision)
+			initResourceFromClient[*databasev1.IndexRuleBinding](ctx, r, nodeConn.mgrClient, schema.KindIndexRuleBinding, groupName, &maxRevision)
 		}
 	}
 	r.l.Info().Str("address", nodeConn.conn.Target()).
-		Int64("maxRevision", maxRevision).Msg("completed resource initialization")
-}
-
-func (r *SchemaRegistry) initializeStreamResources(ctx context.Context, group string, maxRevision *int64) {
-	streams, listErr := r.ListStream(ctx, schema.ListOpt{Group: group})
-	if listErr != nil {
-		r.l.Warn().Err(listErr).Str("group", group).Msg("failed to list streams")
-		return
-	}
-	for _, stream := range streams {
-		*maxRevision = r.processInitialResource(schema.KindStream, stream, *maxRevision)
-	}
-}
-
-func (r *SchemaRegistry) initializeMeasureResources(ctx context.Context, group string, maxRevision *int64) {
-	measures, listErr := r.ListMeasure(ctx, schema.ListOpt{Group: group})
-	if listErr != nil {
-		r.l.Warn().Err(listErr).Str("group", group).Msg("failed to list measures")
-		return
-	}
-	for _, measure := range measures {
-		*maxRevision = r.processInitialResource(schema.KindMeasure, measure, *maxRevision)
-	}
-	topNs, topNErr := r.ListTopNAggregation(ctx, schema.ListOpt{Group: group})
-	if topNErr != nil {
-		r.l.Warn().Err(topNErr).Str("group", group).Msg("failed to list topN aggregations")
-		return
-	}
-	for _, topN := range topNs {
-		*maxRevision = r.processInitialResource(schema.KindTopNAggregation, topN, *maxRevision)
-	}
-}
-
-func (r *SchemaRegistry) initializeTraceResources(ctx context.Context, group string, maxRevision *int64) {
-	traces, listErr := r.ListTrace(ctx, schema.ListOpt{Group: group})
-	if listErr != nil {
-		r.l.Warn().Err(listErr).Str("group", group).Msg("failed to list traces")
-		return
-	}
-	for _, trace := range traces {
-		*maxRevision = r.processInitialResource(schema.KindTrace, trace, *maxRevision)
-	}
-}
-
-func (r *SchemaRegistry) initializePropertyResources(ctx context.Context, group string, maxRevision *int64) {
-	props, listErr := r.ListProperty(ctx, schema.ListOpt{Group: group})
-	if listErr != nil {
-		r.l.Warn().Err(listErr).Str("group", group).Msg("failed to list properties")
-		return
-	}
-	for _, prop := range props {
-		*maxRevision = r.processInitialResource(schema.KindProperty, prop, *maxRevision)
-	}
-}
-
-func (r *SchemaRegistry) initializeIndexResources(ctx context.Context, group string, maxRevision *int64) {
-	rules, rulesErr := r.ListIndexRule(ctx, schema.ListOpt{Group: group})
-	if rulesErr != nil {
-		r.l.Warn().Err(rulesErr).Str("group", group).Msg("failed to list index rules")
-	} else {
-		for _, rule := range rules {
-			*maxRevision = r.processInitialResource(schema.KindIndexRule, rule, *maxRevision)
-		}
-	}
-	bindings, bindingsErr := r.ListIndexRuleBinding(ctx, schema.ListOpt{Group: group})
-	if bindingsErr != nil {
-		r.l.Warn().Err(bindingsErr).Str("group", group).Msg("failed to list index rule bindings")
-	} else {
-		for _, binding := range bindings {
-			*maxRevision = r.processInitialResource(schema.KindIndexRuleBinding, binding, *maxRevision)
-		}
-	}
+		Int64("latestUpdateAt", maxRevision).Msg("completed resource initialization")
 }
 
 func (r *SchemaRegistry) processInitialResource(kind schema.Kind, spec proto.Message, currentMax int64) int64 {
@@ -1312,13 +1098,12 @@ func (r *SchemaRegistry) processInitialResource(kind schema.Kind, spec proto.Mes
 		r.l.Warn().Err(convErr).Stringer("kind", kind).Msg("failed to convert to property")
 		return currentMax
 	}
-	revision := prop.Metadata.GetModRevision()
-	entry := cacheEntry{
-		valueHash:   computePropertyHash(prop),
-		modRevision: revision,
-		kind:        kind,
-		group:       getGroupFromTags(prop.Tags),
-		name:        getNameFromTags(prop.Tags),
+	revision := prop.UpdatedAt.AsTime().UnixNano()
+	entry := &cacheEntry{
+		latestUpdateAt: revision,
+		kind:           kind,
+		group:          getGroupFromTags(prop.Tags),
+		name:           getNameFromTags(prop.Tags),
 	}
 	if r.cache.Update(prop.Id, entry) {
 		md := schema.Metadata{
@@ -1326,21 +1111,19 @@ func (r *SchemaRegistry) processInitialResource(kind schema.Kind, spec proto.Mes
 				Kind:        kind,
 				Name:        entry.name,
 				Group:       entry.group,
-				ModRevision: revision,
+				ModRevision: prop.Metadata.ModRevision,
 			},
 			Spec: spec,
 		}
 		r.notifyHandlers(kind, md, false)
 	}
+	if r.metrics != nil {
+		r.metrics.cacheSize.Set(float64(r.cache.Size()))
+	}
 	if revision > currentMax {
 		return revision
 	}
 	return currentMax
-}
-
-func computePropertyHash(prop *propertyv1.Property) uint64 {
-	data, _ := proto.Marshal(prop)
-	return convert.Hash(data)
 }
 
 func getGroupFromTags(tags []*modelv1.Tag) string {
@@ -1394,7 +1177,7 @@ func parsePropertyID(propID string) (schema.Kind, string, string) {
 	if kindErr != nil {
 		return 0, "", ""
 	}
-	if kind == schema.KindGroup || kind == schema.KindNode {
+	if kind == schema.KindGroup {
 		return kind, "", rest
 	}
 	slashIdx := strings.Index(rest, "/")
@@ -1422,17 +1205,33 @@ func (r *SchemaRegistry) globalSync() {
 }
 
 func (r *SchemaRegistry) performSync() {
-	r.l.Info().Msg("performing global schema sync")
+	if r.metrics != nil {
+		r.metrics.totalSyncStarted.Inc(1)
+	}
+	start := time.Now()
+	defer func() {
+		if r.metrics != nil {
+			r.metrics.totalSyncFinished.Inc(1)
+			r.metrics.totalSyncLatency.Inc(time.Since(start).Seconds())
+		}
+	}()
+	r.l.Debug().Msg("performing global schema sync")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	clients := r.getSchemaUpdateClients()
+	clients := r.getClients()
+	if len(clients) == 0 {
+		return
+	}
 	for _, c := range clients {
 		sinceRevision := r.cache.GetMaxRevision()
 		updatedNames := r.queryUpdatedSchemas(ctx, c.updateClient, sinceRevision)
-		syncedKinds := make(map[schema.Kind]struct{})
+		syncedKinds := make(map[schema.Kind]bool)
 		if len(updatedNames) > 0 {
+			if r.metrics != nil {
+				r.metrics.totalSyncUpdates.Inc(float64(len(updatedNames)))
+			}
 			r.l.Info().Str("connection", c.conn.Target()).
-				Int("count", len(updatedNames)).
+				Strs("schema_names", updatedNames).
 				Int64("sinceRevision", sinceRevision).
 				Msg("detected schema updates")
 			for _, name := range updatedNames {
@@ -1441,23 +1240,8 @@ func (r *SchemaRegistry) performSync() {
 					r.l.Warn().Str("kind_name", name).Err(kindErr).Msg("failed to parse kind from name")
 					continue
 				}
-				syncedKinds[kind] = struct{}{}
-				if kind == schema.KindGroup {
-					r.syncGroupResources(ctx, c.mgrClient)
-					continue
-				}
-				r.syncAllResourcesOfKind(ctx, c.mgrClient, kind, "")
-			}
-		}
-		cachedKinds := r.cache.GetCachedKinds()
-		for _, kind := range cachedKinds {
-			if _, synced := syncedKinds[kind]; synced {
-				continue
-			}
-			if kind == schema.KindGroup {
-				r.syncGroupResources(ctx, c.mgrClient)
-			} else {
-				r.syncAllResourcesOfKind(ctx, c.mgrClient, kind, "")
+				syncedKinds[kind] = true
+				r.syncAllResourcesOfKind(ctx, c.mgrClient, kind)
 			}
 		}
 	}
@@ -1467,7 +1251,7 @@ func (r *SchemaRegistry) queryUpdatedSchemas(ctx context.Context, c schemav1.Sch
 	req := &schemav1.AggregateSchemaUpdatesRequest{
 		Query: &propertyv1.QueryRequest{
 			Groups:   []string{SchemaGroup},
-			Criteria: buildModRevisionCriteria(reversion),
+			Criteria: buildUpdatedAtCriteria(reversion),
 			Limit:    10000,
 		},
 	}
@@ -1479,7 +1263,7 @@ func (r *SchemaRegistry) queryUpdatedSchemas(ctx context.Context, c schemav1.Sch
 	return resp.Names
 }
 
-func (r *SchemaRegistry) getSchemaUpdateClients() []*nodeConnection {
+func (r *SchemaRegistry) getClients() []*nodeConnection {
 	r.connMu.RLock()
 	defer r.connMu.RUnlock()
 	clients := make([]*nodeConnection, 0, len(r.nodeConns))
@@ -1489,63 +1273,36 @@ func (r *SchemaRegistry) getSchemaUpdateClients() []*nodeConnection {
 	return clients
 }
 
-func (r *SchemaRegistry) syncGroupResources(ctx context.Context, client schemav1.SchemaManagementServiceClient) {
-	cachedGroupEntries := r.cache.GetEntriesByKind(schema.KindGroup)
-	groups, listErr := r.listGroupFromClient(ctx, client)
-	if listErr != nil {
-		r.l.Warn().Err(listErr).Msg("failed to list groups during sync")
-		return
-	}
-	currentGroupPropIDs := make(map[string]struct{}, len(groups))
-	for _, group := range groups {
-		propID := BuildPropertyID(schema.KindGroup, group.GetMetadata())
-		currentGroupPropIDs[propID] = struct{}{}
-		r.processInitialResource(schema.KindGroup, group, 0)
-		groupName := group.GetMetadata().GetName()
-		catalog := group.GetCatalog()
-		switch catalog {
-		case commonv1.Catalog_CATALOG_STREAM:
-			r.initializeStreamResourcesFromClient(ctx, client, groupName, new(int64))
-			r.initializeIndexResourcesFromClient(ctx, client, groupName, new(int64))
-		case commonv1.Catalog_CATALOG_MEASURE:
-			r.initializeMeasureResourcesFromClient(ctx, client, groupName, new(int64))
-			r.initializeIndexResourcesFromClient(ctx, client, groupName, new(int64))
-		case commonv1.Catalog_CATALOG_TRACE:
-			r.initializeTraceResourcesFromClient(ctx, client, groupName, new(int64))
-			r.initializeIndexResourcesFromClient(ctx, client, groupName, new(int64))
-		case commonv1.Catalog_CATALOG_PROPERTY:
-			r.initializePropertyResourcesFromClient(ctx, client, groupName, new(int64))
-		}
-	}
-	for cachedPropID, cachedEntry := range cachedGroupEntries {
-		if _, exists := currentGroupPropIDs[cachedPropID]; !exists {
-			r.handleDeletion(schema.KindGroup, cachedPropID, cachedEntry)
-		}
-	}
-}
-
 func (r *SchemaRegistry) syncAllResourcesOfKind(ctx context.Context, client schemav1.SchemaManagementServiceClient,
-	kind schema.Kind, group string,
+	kind schema.Kind,
 ) {
 	cachedEntries := r.cache.GetEntriesByKind(kind)
-	if group != "" {
-		filteredEntries := make(map[string]cacheEntry)
-		for propID, entry := range cachedEntries {
-			if entry.group == group {
-				filteredEntries[propID] = entry
-			}
-		}
-		cachedEntries = filteredEntries
-	}
-	props, listErr := r.listSchemasFromClient(ctx, client, kind, group)
+	propsWithDeleteTime, listErr := r.querySchemasFromClient(ctx, client, buildSchemaQuery(kind, "", nil))
 	if listErr != nil {
 		r.l.Warn().Err(listErr).Stringer("kind", kind).Msg("failed to list resources during sync")
 		return
 	}
-	currentPropIDs := make(map[string]struct{}, len(props))
-	for _, prop := range props {
-		currentPropIDs[prop.Id] = struct{}{}
-		md, convErr := ToSchema(kind, prop)
+	var maxRevision int64
+	currentPropIDs := make(map[string]*schemaWithDeleteTime, len(propsWithDeleteTime))
+	for _, propWithDT := range propsWithDeleteTime {
+		if s, exist := currentPropIDs[propWithDT.property.Id]; exist {
+			if propWithDT.property.UpdatedAt.AsTime().After(s.property.UpdatedAt.AsTime()) {
+				currentPropIDs[propWithDT.property.Id] = propWithDT
+			}
+			continue
+		}
+		currentPropIDs[propWithDT.property.Id] = propWithDT
+	}
+	for _, s := range currentPropIDs {
+		// Track max revision for all resources, including deleted ones
+		revision := s.property.UpdatedAt.AsTime().UnixNano()
+		if revision > maxRevision {
+			maxRevision = revision
+		}
+		if s.deleteTime > 0 {
+			continue
+		}
+		md, convErr := ToSchema(kind, s.property)
 		if convErr != nil {
 			r.l.Warn().Err(convErr).Stringer("kind", kind).Msg("failed to convert property to schema")
 			continue
@@ -1555,17 +1312,17 @@ func (r *SchemaRegistry) syncAllResourcesOfKind(ctx context.Context, client sche
 			r.l.Warn().Stringer("kind", kind).Msg("spec does not implement proto.Message")
 			continue
 		}
-		r.processInitialResource(kind, spec, 0)
+		maxRevision = r.processInitialResource(kind, spec, maxRevision)
 	}
 	for cachedPropID, cachedEntry := range cachedEntries {
-		if _, exists := currentPropIDs[cachedPropID]; !exists {
-			r.handleDeletion(kind, cachedPropID, cachedEntry)
+		if p, exists := currentPropIDs[cachedPropID]; !exists || p.deleteTime > 0 {
+			r.handleDeletion(kind, cachedPropID, cachedEntry, p.property.UpdatedAt.AsTime().UnixNano())
 		}
 	}
 }
 
-func (r *SchemaRegistry) handleDeletion(kind schema.Kind, propID string, entry cacheEntry) {
-	if !r.cache.Delete(propID) {
+func (r *SchemaRegistry) handleDeletion(kind schema.Kind, propID string, entry *cacheEntry, maxRevision int64) {
+	if !r.cache.Delete(propID, maxRevision) {
 		return
 	}
 	md := schema.Metadata{
@@ -1573,7 +1330,7 @@ func (r *SchemaRegistry) handleDeletion(kind schema.Kind, propID string, entry c
 			Kind:        kind,
 			Name:        entry.name,
 			Group:       entry.group,
-			ModRevision: entry.modRevision,
+			ModRevision: maxRevision,
 		},
 		Spec: nil,
 	}
@@ -1581,14 +1338,14 @@ func (r *SchemaRegistry) handleDeletion(kind schema.Kind, propID string, entry c
 	r.notifyHandlers(kind, md, true)
 }
 
-func buildModRevisionCriteria(sinceRevision int64) *modelv1.Criteria {
+func buildUpdatedAtCriteria(sinceRevision int64) *modelv1.Criteria {
 	if sinceRevision <= 0 {
 		return nil
 	}
 	return &modelv1.Criteria{
 		Exp: &modelv1.Criteria_Condition{
 			Condition: &modelv1.Condition{
-				Name: TagKeyModRevision,
+				Name: TagKeyUpdatedAt,
 				Op:   modelv1.Condition_BINARY_OP_GT,
 				Value: &modelv1.TagValue{
 					Value: &modelv1.TagValue_Int{
@@ -1600,51 +1357,17 @@ func buildModRevisionCriteria(sinceRevision int64) *modelv1.Criteria {
 	}
 }
 
-func (r *SchemaRegistry) getSchemaFromClient(ctx context.Context, client schemav1.SchemaManagementServiceClient,
-	kind schema.Kind, group, name string,
-) (*propertyv1.Property, error) {
-	propID := BuildPropertyID(kind, &commonv1.Metadata{Group: group, Name: name})
-	req := &schemav1.GetSchemaRequest{
-		Query: &propertyv1.QueryRequest{
-			Groups: []string{SchemaGroup},
-			Name:   kind.String(),
-			Ids:    []string{propID},
-		},
-	}
-	resp, getErr := client.GetSchema(ctx, req)
-	if getErr != nil {
-		return nil, getErr
-	}
-	return resp.Properties, nil
-}
-
 func (r *SchemaRegistry) listSchemasFromClient(ctx context.Context, client schemav1.SchemaManagementServiceClient,
 	kind schema.Kind, group string,
 ) ([]*propertyv1.Property, error) {
 	req := &schemav1.ListSchemasRequest{
-		Query: &propertyv1.QueryRequest{
-			Groups: []string{SchemaGroup},
-			Name:   kind.String(),
-			Limit:  10000,
-		},
+		Query: buildSchemaQuery(kind, group, nil),
 	}
 	resp, listErr := client.ListSchemas(ctx, req)
 	if listErr != nil {
 		return nil, listErr
 	}
-	if group == "" {
-		return resp.Properties, nil
-	}
-	filtered := make([]*propertyv1.Property, 0, len(resp.Properties))
-	for _, prop := range resp.Properties {
-		for _, tag := range prop.Tags {
-			if tag.Key == TagKeyGroup && tag.Value.GetStr().GetValue() == group {
-				filtered = append(filtered, prop)
-				break
-			}
-		}
-	}
-	return filtered, nil
+	return resp.Properties, nil
 }
 
 func (r *SchemaRegistry) listGroupFromClient(ctx context.Context, client schemav1.SchemaManagementServiceClient) ([]*commonv1.Group, error) {
@@ -1662,135 +1385,4 @@ func (r *SchemaRegistry) listGroupFromClient(ctx context.Context, client schemav
 		groups = append(groups, md.Spec.(*commonv1.Group))
 	}
 	return groups, nil
-}
-
-func (r *SchemaRegistry) getGroupFromClient(ctx context.Context, client schemav1.SchemaManagementServiceClient, groupName string) (*commonv1.Group, error) {
-	prop, getErr := r.getSchemaFromClient(ctx, client, schema.KindGroup, "", groupName)
-	if getErr != nil {
-		return nil, getErr
-	}
-	if prop == nil {
-		return nil, schema.ErrGRPCResourceNotFound
-	}
-	md, convErr := ToSchema(schema.KindGroup, prop)
-	if convErr != nil {
-		return nil, convErr
-	}
-	return md.Spec.(*commonv1.Group), nil
-}
-
-func (r *SchemaRegistry) initializeStreamResourcesFromClient(ctx context.Context, client schemav1.SchemaManagementServiceClient,
-	group string, maxRevision *int64,
-) {
-	props, listErr := r.listSchemasFromClient(ctx, client, schema.KindStream, group)
-	if listErr != nil {
-		r.l.Warn().Err(listErr).Str("group", group).Msg("failed to list streams")
-		return
-	}
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindStream, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to stream")
-			continue
-		}
-		*maxRevision = r.processInitialResource(schema.KindStream, md.Spec.(*databasev1.Stream), *maxRevision)
-	}
-}
-
-func (r *SchemaRegistry) initializeMeasureResourcesFromClient(ctx context.Context, client schemav1.SchemaManagementServiceClient,
-	group string, maxRevision *int64,
-) {
-	props, listErr := r.listSchemasFromClient(ctx, client, schema.KindMeasure, group)
-	if listErr != nil {
-		r.l.Warn().Err(listErr).Str("group", group).Msg("failed to list measures")
-		return
-	}
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindMeasure, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to measure")
-			continue
-		}
-		*maxRevision = r.processInitialResource(schema.KindMeasure, md.Spec.(*databasev1.Measure), *maxRevision)
-	}
-	topNProps, topNErr := r.listSchemasFromClient(ctx, client, schema.KindTopNAggregation, group)
-	if topNErr != nil {
-		r.l.Warn().Err(topNErr).Str("group", group).Msg("failed to list topN aggregations")
-		return
-	}
-	for _, prop := range topNProps {
-		md, convErr := ToSchema(schema.KindTopNAggregation, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to topN aggregation")
-			continue
-		}
-		*maxRevision = r.processInitialResource(schema.KindTopNAggregation, md.Spec.(*databasev1.TopNAggregation), *maxRevision)
-	}
-}
-
-func (r *SchemaRegistry) initializeTraceResourcesFromClient(ctx context.Context, client schemav1.SchemaManagementServiceClient,
-	group string, maxRevision *int64,
-) {
-	props, listErr := r.listSchemasFromClient(ctx, client, schema.KindTrace, group)
-	if listErr != nil {
-		r.l.Warn().Err(listErr).Str("group", group).Msg("failed to list traces")
-		return
-	}
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindTrace, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to trace")
-			continue
-		}
-		*maxRevision = r.processInitialResource(schema.KindTrace, md.Spec.(*databasev1.Trace), *maxRevision)
-	}
-}
-
-func (r *SchemaRegistry) initializePropertyResourcesFromClient(ctx context.Context, client schemav1.SchemaManagementServiceClient,
-	group string, maxRevision *int64,
-) {
-	props, listErr := r.listSchemasFromClient(ctx, client, schema.KindProperty, group)
-	if listErr != nil {
-		r.l.Warn().Err(listErr).Str("group", group).Msg("failed to list properties")
-		return
-	}
-	for _, prop := range props {
-		md, convErr := ToSchema(schema.KindProperty, prop)
-		if convErr != nil {
-			r.l.Warn().Err(convErr).Msg("failed to convert property to database property")
-			continue
-		}
-		*maxRevision = r.processInitialResource(schema.KindProperty, md.Spec.(*databasev1.Property), *maxRevision)
-	}
-}
-
-func (r *SchemaRegistry) initializeIndexResourcesFromClient(ctx context.Context, client schemav1.SchemaManagementServiceClient,
-	group string, maxRevision *int64,
-) {
-	ruleProps, rulesErr := r.listSchemasFromClient(ctx, client, schema.KindIndexRule, group)
-	if rulesErr != nil {
-		r.l.Warn().Err(rulesErr).Str("group", group).Msg("failed to list index rules")
-	} else {
-		for _, prop := range ruleProps {
-			md, convErr := ToSchema(schema.KindIndexRule, prop)
-			if convErr != nil {
-				r.l.Warn().Err(convErr).Msg("failed to convert property to index rule")
-				continue
-			}
-			*maxRevision = r.processInitialResource(schema.KindIndexRule, md.Spec.(*databasev1.IndexRule), *maxRevision)
-		}
-	}
-	bindingProps, bindingsErr := r.listSchemasFromClient(ctx, client, schema.KindIndexRuleBinding, group)
-	if bindingsErr != nil {
-		r.l.Warn().Err(bindingsErr).Str("group", group).Msg("failed to list index rule bindings")
-	} else {
-		for _, prop := range bindingProps {
-			md, convErr := ToSchema(schema.KindIndexRuleBinding, prop)
-			if convErr != nil {
-				r.l.Warn().Err(convErr).Msg("failed to convert property to index rule binding")
-				continue
-			}
-			*maxRevision = r.processInitialResource(schema.KindIndexRuleBinding, md.Spec.(*databasev1.IndexRuleBinding), *maxRevision)
-		}
-	}
 }

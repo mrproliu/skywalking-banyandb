@@ -63,6 +63,7 @@ func newDataCmd(runners ...run.Unit) *cobra.Command {
 		"property": propertySvc,
 	})
 	propertySchemaService := schemaProperty.NewServer(propertySvc, metricSvc, metaSvc, pm)
+	pipeline.AddGrpcHandlerCallback(propertySchemaService.RegisterGRPCServices)
 
 	streamSvc, err := stream.NewService(metaSvc, pipeline, metricSvc, pm, propertyStreamPipeline)
 	if err != nil {

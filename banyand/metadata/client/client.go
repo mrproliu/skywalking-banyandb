@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package client implements the metadata client service.
 package client
 
 import (
@@ -26,9 +27,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/apache/skywalking-banyandb/banyand/metadata"
-	"github.com/apache/skywalking-banyandb/banyand/metadata/schema/etcd"
-	metadataproperty "github.com/apache/skywalking-banyandb/banyand/metadata/schema/property"
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -36,10 +34,13 @@ import (
 	"github.com/apache/skywalking-banyandb/api/common"
 	commonv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/common/v1"
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
+	"github.com/apache/skywalking-banyandb/banyand/metadata"
 	discoverycommon "github.com/apache/skywalking-banyandb/banyand/metadata/discovery/common"
 	"github.com/apache/skywalking-banyandb/banyand/metadata/discovery/dns"
 	"github.com/apache/skywalking-banyandb/banyand/metadata/discovery/file"
 	"github.com/apache/skywalking-banyandb/banyand/metadata/schema"
+	"github.com/apache/skywalking-banyandb/banyand/metadata/schema/etcd"
+	metadataproperty "github.com/apache/skywalking-banyandb/banyand/metadata/schema/property"
 	"github.com/apache/skywalking-banyandb/banyand/observability"
 	"github.com/apache/skywalking-banyandb/pkg/logger"
 	"github.com/apache/skywalking-banyandb/pkg/run"
@@ -88,37 +89,38 @@ func NewClient(toRegisterNode, forceRegisterNode bool) (metadata.Service, error)
 }
 
 type clientService struct {
-	schemaRegistry           schema.Registry
-	dnsDiscovery             *dns.Service
-	fileDiscovery            *file.Service
-	closer                   *run.Closer
-	nodeInfo                 *databasev1.Node
-	etcdTLSCertFile          string
-	dnsCACertPaths           []string
-	etcdPassword             string
-	etcdTLSCAFile            string
-	etcdUsername             string
-	etcdTLSKeyFile           string
-	namespace                string
-	nodeDiscoveryMode        string
-	filePath                 string
-	metadataRegistryMode     string
-	dnsSRVAddresses          []string
-	endpoints                []string
-	registryTimeout          time.Duration
-	dnsFetchInitInterval     time.Duration
-	dnsFetchInitDuration     time.Duration
-	dnsFetchInterval         time.Duration
-	grpcTimeout              time.Duration
-	etcdFullSyncInterval     time.Duration
-	fileFetchInterval        time.Duration
-	fileRetryInitialInterval time.Duration
-	fileRetryMaxInterval     time.Duration
-	fileRetryMultiplier      float64
-	nodeInfoMux              sync.Mutex
-	forceRegisterNode        bool
-	toRegisterNode           bool
-	dnsTLSEnabled            bool
+	schemaRegistry             schema.Registry
+	dnsDiscovery               *dns.Service
+	fileDiscovery              *file.Service
+	closer                     *run.Closer
+	nodeInfo                   *databasev1.Node
+	etcdTLSCertFile            string
+	dnsCACertPaths             []string
+	etcdPassword               string
+	etcdTLSCAFile              string
+	etcdUsername               string
+	etcdTLSKeyFile             string
+	namespace                  string
+	nodeDiscoveryMode          string
+	filePath                   string
+	metadataRegistryMode       string
+	dnsSRVAddresses            []string
+	endpoints                  []string
+	registryTimeout            time.Duration
+	dnsFetchInitInterval       time.Duration
+	dnsFetchInitDuration       time.Duration
+	dnsFetchInterval           time.Duration
+	grpcTimeout                time.Duration
+	propertySchemaSyncInterval time.Duration
+	etcdFullSyncInterval       time.Duration
+	fileFetchInterval          time.Duration
+	fileRetryInitialInterval   time.Duration
+	fileRetryMaxInterval       time.Duration
+	fileRetryMultiplier        float64
+	nodeInfoMux                sync.Mutex
+	forceRegisterNode          bool
+	toRegisterNode             bool
+	dnsTLSEnabled              bool
 }
 
 func (s *clientService) SchemaRegistry() schema.Registry {
@@ -164,16 +166,16 @@ func (s *clientService) FlagSet() *run.FlagSet {
 		"Maximum retry interval for failed node metadata fetches in file discovery mode")
 	fs.Float64Var(&s.fileRetryMultiplier, "node-discovery-file-retry-multiplier", 2.0,
 		"Backoff multiplier for retry intervals in file discovery mode")
-
-	// schema management configuration
-	fs.StringVar(&s.metadataRegistryMode, "metadata-registry-mode", "etcd",
-		"Metadata storage mode: 'etcd' for etcd-based registry, 'property' for native property-based registry")
-	fs.DurationVar(&s.grpcTimeout, "node-discovery-grpc-timeout", 5*time.Second,
-		"Timeout for gRPC calls to fetch node metadata")
 	fs.BoolVar(&s.dnsTLSEnabled, "node-discovery-dns-tls", false,
 		"Enable TLS for DNS discovery gRPC connections")
 	fs.StringSliceVar(&s.dnsCACertPaths, "node-discovery-dns-ca-certs", []string{},
 		"Comma-separated list of CA certificate files to verify DNS discovered nodes (one per SRV address, in same order)")
+
+	// schema management configuration
+	fs.StringVar(&s.metadataRegistryMode, "metadata-registry-mode", "etcd",
+		"Metadata storage mode: 'etcd' for etcd-based registry, 'property' for native property-based registry")
+	fs.DurationVar(&s.propertySchemaSyncInterval, "property-schema-sync-interval", 20*time.Second,
+		"Interval to sync property-based schema with other nodes")
 	return fs
 }
 
@@ -310,11 +312,15 @@ func (s *clientService) PreRun(ctx context.Context) error {
 		} else if s.fileDiscovery != nil {
 			dialProvider = s.fileDiscovery
 		}
-		registry := metadataproperty.NewSchemaRegistryClient(dialProvider, s.grpcTimeout)
+		registry := metadataproperty.NewSchemaRegistryClient(dialProvider, s.grpcTimeout, s.propertySchemaSyncInterval)
 		s.RegisterHandler("property-schema-registry", schema.KindNode, registry)
 		s.schemaRegistry = registry
 	}
 
+	return s.registerNodeIfNeed(ctx, l, stopCh)
+}
+
+func (s *clientService) registerNodeIfNeed(ctx context.Context, l *logger.Logger, stopCh chan struct{}) error {
 	// skip node registration if DNS/file mode is enabled or node registration is disabled
 	if !s.toRegisterNode || s.nodeDiscoveryMode == NodeDiscoveryModeDNS ||
 		s.nodeDiscoveryMode == NodeDiscoveryModeFile {
@@ -485,6 +491,10 @@ func (s *clientService) SetMetricsRegistry(omr observability.MetricsRegistry) {
 	if s.fileDiscovery != nil {
 		factory := observability.RootScope.SubScope("metadata").SubScope("file_discovery")
 		s.fileDiscovery.SetMetrics(omr.With(factory))
+	}
+	// initialize property schema registry with metrics if it exists
+	if propRegistry, ok := s.schemaRegistry.(*metadataproperty.SchemaRegistry); ok {
+		propRegistry.SetMetrics(omr)
 	}
 }
 

@@ -29,6 +29,7 @@ import (
 	databasev1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/database/v1"
 )
 
+// ErrUnsupportedEntityType indicates the entity type is not supported.
 var ErrUnsupportedEntityType = errors.New("unsupported entity type")
 
 // EventHandler allows receiving and handling the resource change events.
@@ -92,6 +93,7 @@ type Metadata struct {
 // Spec is a placeholder of a serialized resource.
 type Spec interface{}
 
+// Equal checks whether two Metadata are equal.
 func (m Metadata) Equal(other Metadata) bool {
 	if other.Spec == nil {
 		return false

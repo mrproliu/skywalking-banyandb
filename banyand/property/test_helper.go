@@ -256,8 +256,28 @@ func (s *testService) GetGossIPGrpcPort() *uint32 {
 	return nil
 }
 
+// DirectInsert implements DirectService.DirectInsert.
+func (s *testService) DirectInsert(ctx context.Context, _ string, shardID uint32, id []byte, prop *propertyv1.Property) error {
+	return s.db.update(ctx, common.ShardID(shardID), id, prop)
+}
+
 // DirectUpdate implements DirectService.DirectUpdate.
 func (s *testService) DirectUpdate(ctx context.Context, group string, shardID uint32, id []byte, prop *propertyv1.Property) error {
+	olderProperties, queryErr := s.db.query(ctx, &propertyv1.QueryRequest{
+		Groups: []string{group},
+		Name:   prop.Metadata.Name,
+		Ids:    []string{prop.Id},
+	})
+	if queryErr != nil {
+		return queryErr
+	}
+	defer func() {
+		olderIDs := make([][]byte, 0, len(olderProperties))
+		for _, p := range olderProperties {
+			olderIDs = append(olderIDs, p.id)
+		}
+		_ = s.db.delete(ctx, olderIDs)
+	}()
 	return s.db.update(ctx, common.ShardID(shardID), id, prop)
 }
 
@@ -267,19 +287,19 @@ func (s *testService) DirectDelete(ctx context.Context, ids [][]byte) error {
 }
 
 // DirectQuery implements DirectService.DirectQuery.
-func (s *testService) DirectQuery(ctx context.Context, req *propertyv1.QueryRequest) ([]*PropertyWithDeleteTime, error) {
+func (s *testService) DirectQuery(ctx context.Context, req *propertyv1.QueryRequest) ([]*WithDeleteTime, error) {
 	results, queryErr := s.db.query(ctx, req)
 	if queryErr != nil {
 		return nil, queryErr
 	}
-	props := make([]*PropertyWithDeleteTime, 0, len(results))
+	props := make([]*WithDeleteTime, 0, len(results))
 	for _, r := range results {
 		prop := &propertyv1.Property{}
 		if unmarshalErr := protojson.Unmarshal(r.source, prop); unmarshalErr != nil {
 			s.l.Warn().Err(unmarshalErr).Msg("failed to unmarshal property")
 			continue
 		}
-		props = append(props, &PropertyWithDeleteTime{
+		props = append(props, &WithDeleteTime{
 			Property:   prop,
 			DeleteTime: r.deleteTime,
 		})
@@ -293,7 +313,6 @@ func (s *testService) DirectGet(ctx context.Context, group, name, id string) (*p
 		Groups: []string{group},
 		Name:   name,
 		Ids:    []string{id},
-		Limit:  1,
 	}
 	results, queryErr := s.DirectQuery(ctx, req)
 	if queryErr != nil {

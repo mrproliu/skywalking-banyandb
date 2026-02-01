@@ -30,20 +30,22 @@ import (
 	"github.com/apache/skywalking-banyandb/pkg/run"
 )
 
-// PropertyWithDeleteTime wraps a property with its delete time for cross-node sync.
-type PropertyWithDeleteTime struct {
+// WithDeleteTime wraps a property with its delete time for cross-node sync.
+type WithDeleteTime struct {
 	Property   *propertyv1.Property
 	DeleteTime int64
 }
 
 // DirectService provides direct access to property operations without going through pipeline.
 type DirectService interface {
-	// DirectUpdate directly inserts or updates a property.
+	// DirectInsert directly insert a property.
+	DirectInsert(ctx context.Context, group string, shardID uint32, id []byte, property *propertyv1.Property) error
+	// DirectUpdate directly update a property.
 	DirectUpdate(ctx context.Context, group string, shardID uint32, id []byte, property *propertyv1.Property) error
 	// DirectDelete directly deletes properties by their document IDs.
 	DirectDelete(ctx context.Context, ids [][]byte) error
 	// DirectQuery directly queries properties with deleteTime info.
-	DirectQuery(ctx context.Context, req *propertyv1.QueryRequest) ([]*PropertyWithDeleteTime, error)
+	DirectQuery(ctx context.Context, req *propertyv1.QueryRequest) ([]*WithDeleteTime, error)
 	// DirectGet directly gets a single property (filters out deleted).
 	DirectGet(ctx context.Context, group, name, id string) (*propertyv1.Property, error)
 	// DirectRepair repairs a property on this node with specified deleteTime.

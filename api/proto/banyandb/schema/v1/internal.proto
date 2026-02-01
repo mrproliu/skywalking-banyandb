@@ -21,6 +21,7 @@ package banyandb.schema.v1;
 
 import "banyandb/property/v1/property.proto";
 import "banyandb/property/v1/rpc.proto";
+import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/apache/skywalking-banyandb/api/proto/banyandb/schema/v1";
 option java_package = "org.apache.skywalking.banyandb.schema.v1";
@@ -29,15 +30,13 @@ message InsertSchemaRequest {
   property.v1.Property property = 1;
 }
 
-message InsertSchemaResponse {
-}
+message InsertSchemaResponse {}
 
 message UpdateSchemaRequest {
   property.v1.Property property = 1;
 }
 
-message UpdateSchemaResponse {
-}
+message UpdateSchemaResponse {}
 
 message ListSchemasRequest {
   property.v1.QueryRequest query = 1;
@@ -60,6 +59,8 @@ message GetSchemaResponse {
 
 message DeleteSchemaRequest {
   property.v1.DeleteRequest delete = 1;
+  // Update the update time for notification
+  google.protobuf.Timestamp update_at = 2;
 }
 
 message DeleteSchemaResponse {
@@ -71,8 +72,7 @@ message RepairSchemaRequest {
   int64 delete_time = 2;
 }
 
-message RepairSchemaResponse {
-}
+message RepairSchemaResponse {}
 
 service SchemaManagementService {
   rpc InsertSchema(InsertSchemaRequest) returns (InsertSchemaResponse);
