@@ -16,18 +16,13 @@
 version: '2.1'
 
 services:
-  etcd:
-    extends:
-      file: ../../script/docker-compose/base-compose.yml
-      service: etcd
-    networks:
-      - e2e
-
   data:
     extends:
       file: ../../script/docker-compose/base-compose.yml
       service: data
-    command: data --etcd-endpoints=http://etcd:2379 --node-discovery-mode=etcd
+    command: data --node-discovery-mode=file --node-discovery-file-path=/etc/banyandb/nodes.yaml
+    volumes:
+      - ./nodes.yaml:/etc/banyandb/nodes.yaml
     networks:
       - e2e
 
@@ -35,7 +30,9 @@ services:
     extends:
       file: ../../script/docker-compose/base-compose.yml
       service: liaison
-    command: liaison --etcd-endpoints=http://etcd:2379 --node-discovery-mode=etcd
+    command: liaison --node-discovery-mode=file --node-discovery-file-path=/etc/banyandb/nodes.yaml
+    volumes:
+      - ./nodes.yaml:/etc/banyandb/nodes.yaml
     networks:
       - e2e
 

@@ -12,6 +12,11 @@ Release Notes.
 - Sync lifecycle e2e test from SkyWalking stages test.
 - Add periodic health check for property schema connection.
 - Persist segment end time in per-segment metadata so boundaries don't shift across restarts or config changes.
+- [Breaking Change] Remove etcd components. The property-based schema registry is now the only supported mode. 
+  - All `--etcd-*` CLI flags have been removed. 
+  - The `--namespace` CLI flag has been removed (it previously configured the etcd key prefix).
+  - The `--node-discovery-mode` flag no longer accepts `etcd` (supported values: `none`, `dns`, `file`). 
+  - The `--schema-registry-mode` flag only accepts `property`.
 
 ### Bug Fixes
 

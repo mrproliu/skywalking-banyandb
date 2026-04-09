@@ -23,27 +23,23 @@ import (
 	gm "github.com/onsi/gomega"
 
 	"github.com/apache/skywalking-banyandb/pkg/logger"
+	"github.com/apache/skywalking-banyandb/pkg/test"
 	"github.com/apache/skywalking-banyandb/pkg/test/flags"
 	"github.com/apache/skywalking-banyandb/pkg/test/setup"
 )
 
-// SetupResult contains all info returned by SetupFunc.
-type SetupResult struct {
-	Config *setup.ClusterConfig
+// NewTestConfig creates a fresh ClusterConfig for each test to avoid shared state.
+func NewTestConfig() *setup.ClusterConfig {
+	tmpDir, tmpDirCleanup, tmpErr := test.NewSpace()
+	gm.Expect(tmpErr).NotTo(gm.HaveOccurred())
+	dfWriter := setup.NewDiscoveryFileWriter(tmpDir)
+	g.DeferCleanup(tmpDirCleanup)
+	return setup.PropertyClusterConfig(dfWriter)
 }
-
-// SetupFunc is provided by sub-packages to perform mode-specific setup.
-var SetupFunc func() SetupResult
-
-var testConfig *setup.ClusterConfig
 
 var _ = g.BeforeSuite(func() {
 	gm.Expect(logger.Init(logger.Logging{
 		Env:   "dev",
 		Level: flags.LogLevel,
 	})).To(gm.Succeed())
-	if SetupFunc != nil {
-		r := SetupFunc()
-		testConfig = r.Config
-	}
 })
