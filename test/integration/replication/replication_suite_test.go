@@ -106,14 +106,6 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	liaisonAddr2, closerLiaisonNode := setup.LiaisonNode(clusterConfig, "--data-node-selector", "role=data")
 	liaisonAddr = liaisonAddr2
 
-	By("Loading schema")
-	setup.PreloadSchemaViaProperty(clusterConfig,
-		test_stream.PreloadSchema,
-		test_measure.PreloadSchema,
-		test_trace.PreloadSchema,
-		test_property.PreloadSchema,
-	)
-
 	By("Waiting for liaison to discover all data nodes")
 	waitConn, waitConnErr := grpchelper.Conn(liaisonAddr, 10*time.Second,
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
