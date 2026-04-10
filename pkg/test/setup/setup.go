@@ -75,9 +75,11 @@ type SchemaRegistryConfig struct {
 	Mode string // ModeProperty
 }
 
-var defaultClusterConfig = &ClusterConfig{
-	NodeDiscovery:  NodeDiscoveryConfig{Mode: ModeNone},
-	SchemaRegistry: SchemaRegistryConfig{Mode: ModeProperty},
+func newDefaultClusterConfig() *ClusterConfig {
+	return &ClusterConfig{
+		NodeDiscovery:  NodeDiscoveryConfig{Mode: ModeNone},
+		SchemaRegistry: SchemaRegistryConfig{Mode: ModeProperty},
+	}
 }
 
 // ClusterConfig configures node discovery and schema registry for test clusters.
@@ -323,7 +325,7 @@ func StandaloneWithSchemaLoaders(config *ClusterConfig, schemaLoaders []SchemaLo
 	path, deferFn, err := test.NewSpace()
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	if config == nil {
-		config = defaultClusterConfig
+		config = newDefaultClusterConfig()
 	}
 	portCount := 5
 	var ports []int
@@ -366,7 +368,7 @@ func standaloneServerWithAuth(config *ClusterConfig, path string, ports []int, s
 	username, password string, flags ...string,
 ) (string, string, func()) {
 	if config == nil {
-		config = defaultClusterConfig
+		config = newDefaultClusterConfig()
 	}
 	addr := fmt.Sprintf("%s:%d", host, ports[0])
 	httpAddr := fmt.Sprintf("%s:%d", host, ports[1])
@@ -441,7 +443,7 @@ func standaloneServerWithAuth(config *ClusterConfig, path string, ports []int, s
 		}
 		waitForSchemaSyncWithAuth(addr, username, password, dialOpts...)
 		if config.NodeDiscovery.Mode == ModeFile {
-			waitForNodeDiscovery(addr)
+			waitForNodeDiscovery(addr, dialOpts...)
 		}
 	}
 	return addr, httpAddr, closeFn
@@ -547,7 +549,7 @@ func hasFlagValue(flags []string, key, value string) bool {
 
 func startDataNode(config *ClusterConfig, dataDir string, flags ...string) (string, string, func()) {
 	if config == nil {
-		config = defaultClusterConfig
+		config = newDefaultClusterConfig()
 	}
 	runSchemaServer := !hasFlagValue(flags, "--has-meta-role", "false")
 	portCount := 2
@@ -653,7 +655,7 @@ func DataNodeWithAddrAndDir(config *ClusterConfig, flags ...string) (string, str
 
 func startLiaisonNode(config *ClusterConfig, path string, flags ...string) (string, string, func()) {
 	if config == nil {
-		config = defaultClusterConfig
+		config = newDefaultClusterConfig()
 	}
 	ports, err := test.AllocateFreePorts(3)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -767,9 +769,8 @@ func waitForSchemaSyncWithAuth(grpcAddr, username, password string, opts ...grpc
 	}, testflags.EventuallyTimeout).Should(gomega.Succeed())
 }
 
-func waitForNodeDiscovery(grpcAddr string) {
-	conn, connErr := grpchelper.Conn(grpcAddr, 10*time.Second,
-		grpclib.WithTransportCredentials(insecure.NewCredentials()))
+func waitForNodeDiscovery(grpcAddr string, dialOpts ...grpclib.DialOption) {
+	conn, connErr := grpchelper.Conn(grpcAddr, 10*time.Second, dialOpts...)
 	gomega.Expect(connErr).NotTo(gomega.HaveOccurred())
 	defer func() {
 		if conn != nil {

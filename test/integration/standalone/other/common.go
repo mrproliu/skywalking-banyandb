@@ -23,18 +23,17 @@ import (
 	gm "github.com/onsi/gomega"
 
 	"github.com/apache/skywalking-banyandb/pkg/logger"
-	"github.com/apache/skywalking-banyandb/pkg/test"
 	"github.com/apache/skywalking-banyandb/pkg/test/flags"
 	"github.com/apache/skywalking-banyandb/pkg/test/setup"
 )
 
-// NewTestConfig creates a fresh ClusterConfig for each test to avoid shared state.
+// NewTestConfig creates a fresh ClusterConfig for standalone tests.
+// Standalone tests use ModeNone for node discovery since no cluster discovery is needed.
 func NewTestConfig() *setup.ClusterConfig {
-	tmpDir, tmpDirCleanup, tmpErr := test.NewSpace()
-	gm.Expect(tmpErr).NotTo(gm.HaveOccurred())
-	dfWriter := setup.NewDiscoveryFileWriter(tmpDir)
-	g.DeferCleanup(tmpDirCleanup)
-	return setup.PropertyClusterConfig(dfWriter)
+	return &setup.ClusterConfig{
+		NodeDiscovery:  setup.NodeDiscoveryConfig{Mode: setup.ModeNone},
+		SchemaRegistry: setup.SchemaRegistryConfig{Mode: setup.ModeProperty},
+	}
 }
 
 var _ = g.BeforeSuite(func() {
