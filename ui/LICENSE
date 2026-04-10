@@ -70,7 +70,8 @@ MIT licenses
     @floating-ui/utils 0.2.11 MIT
     @jridgewell/sourcemap-codec 1.5.5 MIT
     @parcel/watcher 2.5.6 MIT
-    @parcel/watcher-darwin-arm64 2.5.6 MIT
+    @parcel/watcher-linux-x64-glibc 2.5.6 MIT
+    @parcel/watcher-linux-x64-musl 2.5.6 MIT
     @popperjs/core 2.11.8 MIT
     @tanstack/match-sorter-utils 8.19.4 MIT
     @tanstack/query-core 5.97.0 MIT
