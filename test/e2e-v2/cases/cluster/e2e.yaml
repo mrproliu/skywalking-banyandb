@@ -17,24 +17,37 @@
 
 setup:
   env: compose
-  file: docker-compose-property.yml
+  file: docker-compose.yml
   timeout: 20m
-  init-system-environment: ../../../script/env
+  init-system-environment: ../../script/env
   steps:
-    - name: set PATH
-      command: export PATH=/tmp/skywalking-infra-e2e/bin:$PATH
-    - name: install yq
-      command: bash test/e2e-v2/script/prepare/setup-e2e-shell/install.sh yq
-    - name: install swctl
-      command: bash test/e2e-v2/script/prepare/setup-e2e-shell/install.sh swctl
+  - name: set PATH
+    command: export PATH=/tmp/skywalking-infra-e2e/bin:$PATH
+  - name: install yq
+    command: bash test/e2e-v2/script/prepare/setup-e2e-shell/install.sh yq
+  - name: install swctl
+    command: bash test/e2e-v2/script/prepare/setup-e2e-shell/install.sh swctl
+
+trigger:
+  action: http
+  interval: 5s
+  times: -1
+  url: http://${consumer_host}:${consumer_9092}/users
+  method: POST
+  body: '{"id":"123","name":"skywalking"}'
+  headers:
+    "Content-Type": "application/json"
 
 verify:
+  # verify with retry strategy
   retry:
+    # max retry count
     count: 20
-    interval: 3s
+    # the interval between two retries, in millisecond.
+    interval: 10s
   cases:
-    - includes:
-        - ../event-cases.yaml
+  - includes:
+    - ../storage/storage-cases.yaml
 
 cleanup:
   on: always
@@ -42,7 +55,7 @@ cleanup:
     on: failure
     output-dir: $SW_INFRA_E2E_LOG_DIR/banyandb-data
     items:
-      - service: banyandb
+      - service: data
         paths:
           - /tmp/trace/
           - /tmp/stream/
