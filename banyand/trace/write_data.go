@@ -308,7 +308,7 @@ func (s *syncChunkCallback) CreatePartHandler(ctx *queue.ChunkedSyncPartContext)
 	}
 	if err := partCtx.NewPartType(ctx); err != nil {
 		if closeErr := partCtx.Close(); closeErr != nil {
-			return nil, fmt.Errorf("new part type: %w; close part context: %v", err, closeErr)
+			return nil, fmt.Errorf("new part type: %w; close part context: %w", err, closeErr)
 		}
 		return nil, err
 	}

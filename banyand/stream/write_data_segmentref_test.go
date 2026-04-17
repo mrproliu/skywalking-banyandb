@@ -200,7 +200,6 @@ func openTestTSDBForRefTest(t *testing.T, tmpPath string, openShardCount *atomic
 	ctx := common.SetPosition(
 		context.WithValue(context.Background(), logger.ContextKey, logger.GetLogger("test")),
 		func(p common.Position) common.Position {
-			p.Module = "stream"
 			p.Database = "test"
 			return p
 		},
