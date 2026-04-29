@@ -969,3 +969,63 @@ func TestHandleClusterLifecycle_DataInfoEmitted(t *testing.T) {
 	require.True(t, ok, "data_info must be encoded as snake_case array")
 	require.Len(t, dataInfo, 1)
 }
+
+func TestHandleClusterLifecycle_StatusReportsUseProtoJSON(t *testing.T) {
+	initTestLogger(t)
+	testLogger := logger.GetLogger("test", "api")
+	testRegistry := registry.NewAgentRegistry(testLogger, 5*time.Second, 10*time.Second, 100)
+	t.Cleanup(testRegistry.Stop)
+	mockSender := &mockRequestSender{}
+	aggregator := metrics.NewAggregator(testRegistry, mockSender, testLogger)
+
+	mockLifecycleRequester := &mockLifecycleDataRequester{
+		dataByAgent: make(map[string]*fodcv1.LifecycleData),
+		podByAgent:  make(map[string]string),
+	}
+	lifecycleMgr := lifecycle.NewManager(testRegistry, mockLifecycleRequester, testLogger)
+	mockLifecycleRequester.lifecycleMgr = lifecycleMgr
+
+	identity := registry.AgentIdentity{
+		PodName:        "test-pod-1",
+		Role:           "datanode",
+		ContainerNames: []string{"banyandb"},
+	}
+	agentID, registerErr := testRegistry.RegisterAgent(context.Background(), identity)
+	require.NoError(t, registerErr)
+
+	mockLifecycleRequester.dataByAgent[agentID] = &fodcv1.LifecycleData{
+		Reports: []*fodcv1.LifecycleReport{
+			{Filename: "2026-04-29.json", ReportJson: `{"status":"ok"}`},
+			{Filename: "2026-04-28.json", ReportJson: ""}, // empty value must still be emitted
+		},
+	}
+	mockLifecycleRequester.podByAgent[agentID] = "test-pod-1"
+
+	server := NewServer(aggregator, nil, lifecycleMgr, testRegistry, testLogger)
+	req := httptest.NewRequest(http.MethodGet, "/cluster/lifecycle", nil)
+	resp := httptest.NewRecorder()
+	server.handleClusterLifecycle(resp, req)
+	require.Equal(t, http.StatusOK, resp.Code)
+
+	var body map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+
+	statuses, ok := body["lifecycle_statuses"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, statuses, 1)
+	status := statuses[0].(map[string]interface{})
+	assert.Equal(t, "test-pod-1", status["pod_name"])
+
+	reports, ok := status["reports"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, reports, 2)
+
+	first := reports[0].(map[string]interface{})
+	assert.Equal(t, "2026-04-29.json", first["filename"])
+	assert.Equal(t, `{"status":"ok"}`, first["report_json"], "field must be snake_case 'report_json'")
+
+	second := reports[1].(map[string]interface{})
+	_, hasReportJSON := second["report_json"]
+	assert.True(t, hasReportJSON, "empty report_json must still be emitted under EmitUnpopulated")
+	assert.Equal(t, "", second["report_json"])
+}

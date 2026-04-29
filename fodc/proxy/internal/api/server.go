@@ -515,9 +515,16 @@ func (s *Server) handleClusterLifecycle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	statusesJSON, err := marshalLifecycleStatuses(lifecycleData.LifecycleStatuses)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Failed to marshal lifecycle statuses")
+		http.Error(w, "Failed to serialize lifecycle statuses", http.StatusInternalServerError)
+		return
+	}
+
 	body := map[string]interface{}{
 		"groups":             groupsJSON,
-		"lifecycle_statuses": lifecycleData.LifecycleStatuses,
+		"lifecycle_statuses": statusesJSON,
 		"agent_summary":      agentSummary,
 	}
 	switch {
@@ -546,6 +553,30 @@ func marshalLifecycleGroups(groups []*fodcv1.GroupLifecycleInfo) ([]json.RawMess
 			return nil, fmt.Errorf("marshal group %q: %w", g.GetName(), err)
 		}
 		out = append(out, raw)
+	}
+	return out, nil
+}
+
+// lifecycleStatusJSON mirrors lifecycle.PodLifecycleStatus but holds each report as a
+// pre-marshaled protojson blob so the LifecycleReport's protobuf zero-value fields are
+// emitted consistently with the groups payload.
+type lifecycleStatusJSON struct {
+	PodName string            `json:"pod_name"`
+	Reports []json.RawMessage `json:"reports"`
+}
+
+func marshalLifecycleStatuses(statuses []*lifecycle.PodLifecycleStatus) ([]lifecycleStatusJSON, error) {
+	out := make([]lifecycleStatusJSON, 0, len(statuses))
+	for _, s := range statuses {
+		reports := make([]json.RawMessage, 0, len(s.Reports))
+		for _, r := range s.Reports {
+			raw, err := lifecycleGroupMarshaler.Marshal(r)
+			if err != nil {
+				return nil, fmt.Errorf("marshal report %q: %w", r.GetFilename(), err)
+			}
+			reports = append(reports, raw)
+		}
+		out = append(out, lifecycleStatusJSON{PodName: s.PodName, Reports: reports})
 	}
 	return out, nil
 }
