@@ -28,7 +28,11 @@ import (
 	"github.com/apache/skywalking-banyandb/pkg/logger"
 )
 
-const defaultCollectionTimeout = 10 * time.Second
+// defaultCollectionTimeout bounds how long the proxy waits for each agent to push back its
+// lifecycle data. It must be greater than or equal to the agent-side InspectAll timeout
+// (see lifecycle.DefaultGRPCTimeout in fodc/agent/internal/lifecycle), otherwise the proxy
+// gives up before the agent has a chance to deliver a successful response.
+const defaultCollectionTimeout = 40 * time.Second
 
 // PodLifecycleStatus represents lifecycle status for a single pod.
 type PodLifecycleStatus struct {

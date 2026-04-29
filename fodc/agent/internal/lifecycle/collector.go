@@ -20,6 +20,7 @@ package lifecycle
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,9 +43,11 @@ const (
 	DefaultReportDir  = "/tmp/lifecycle-reports"
 	maxReportFiles    = 5
 	maxReportFileSize = 5 * 1024 * 1024 // 5MB
+	// DefaultGRPCTimeout bounds how long a single InspectAll call may run. It must be
+	// less than or equal to the proxy-side per-agent collection deadline; otherwise the
+	// proxy gives up before the agent has a chance to deliver a successful response.
+	DefaultGRPCTimeout = 40 * time.Second
 )
-
-const grpcTimeout = 10 * time.Second
 
 // Collector collects lifecycle data from local files.
 type Collector struct {
@@ -73,8 +76,10 @@ func NewCollector(log *logger.Logger, grpcAddr, reportDir string, cacheTTL time.
 	}
 }
 
-// Collect collects lifecycle data from local files.
-// Data is cached for cacheTTL duration; after expiry the next call refreshes the cache.
+// Collect returns lifecycle data, serving the cache when fresh. On a transient
+// InspectAll failure the cache is left untouched so the next call retries, and the
+// current call returns Reports with empty Groups so downstream sees the failure
+// rather than stale data masking a real outage.
 func (c *Collector) Collect(ctx context.Context) (*fodcv1.LifecycleData, error) {
 	c.mu.RLock()
 	if c.currentData != nil && c.cacheTTL > 0 && c.nowFunc().Sub(c.lastCollectTime) < c.cacheTTL {
@@ -84,9 +89,16 @@ func (c *Collector) Collect(ctx context.Context) (*fodcv1.LifecycleData, error) 
 	}
 	c.mu.RUnlock()
 
+	reports := c.readReportFiles()
+	groups, err := c.collectGroups(ctx)
+	if err != nil {
+		c.log.Warn().Err(err).Msg("InspectAll failed; cache untouched, downstream will see empty groups")
+		return &fodcv1.LifecycleData{Reports: reports}, nil
+	}
+
 	data := &fodcv1.LifecycleData{
-		Reports: c.readReportFiles(),
-		Groups:  c.collectGroups(ctx),
+		Reports: reports,
+		Groups:  groups,
 	}
 	c.mu.Lock()
 	c.currentData = data
@@ -95,39 +107,43 @@ func (c *Collector) Collect(ctx context.Context) (*fodcv1.LifecycleData, error) 
 	return data, nil
 }
 
-func (c *Collector) collectGroups(ctx context.Context) []*fodcv1.GroupLifecycleInfo {
+// collectGroups invokes InspectAll on the local liaison.
+//
+// Return contract:
+//   - (nil, nil): no RPC was issued (grpcAddr empty, or InspectAll already known to be Unimplemented).
+//     Callers treat this as a successful collection with no groups.
+//   - (non-nil slice, nil): RPC succeeded. The slice is empty (non-nil) when the server returned no groups.
+//   - (nil, err): a transient error occurred (DeadlineExceeded, Unavailable, dial failure, etc.).
+//     Callers must NOT cache this outcome.
+func (c *Collector) collectGroups(ctx context.Context) ([]*fodcv1.GroupLifecycleInfo, error) {
 	if c.grpcAddr == "" || c.grpcUnimplemented.Load() {
-		return nil
+		return nil, nil
 	}
 	conn, err := grpc.NewClient(c.grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		if c.log != nil {
-			c.log.Warn().Err(err).Str("addr", c.grpcAddr).Msg("Failed to create gRPC connection for InspectAll")
-		}
-		return nil
+		return nil, fmt.Errorf("dial %s: %w", c.grpcAddr, err)
 	}
 	defer func() {
 		_ = conn.Close()
 	}()
 
 	client := fodcv1.NewGroupLifecycleServiceClient(conn)
-	reqCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
+	reqCtx, cancel := context.WithTimeout(ctx, DefaultGRPCTimeout)
 	defer cancel()
 	resp, err := client.InspectAll(reqCtx, &fodcv1.InspectAllRequest{})
 	if err != nil {
 		if status.Code(err) == codes.Unimplemented {
 			c.grpcUnimplemented.Store(true)
-			if c.log != nil {
-				c.log.Info().Str("addr", c.grpcAddr).Msg("GroupLifecycleService.InspectAll is not implemented, skipping future calls")
-			}
-			return nil
+			c.log.Info().Str("addr", c.grpcAddr).Msg("GroupLifecycleService.InspectAll is not implemented, skipping future calls")
+			return nil, nil
 		}
-		if c.log != nil {
-			c.log.Warn().Err(err).Str("addr", c.grpcAddr).Msg("InspectAll failed, skipping groups")
-		}
-		return nil
+		return nil, fmt.Errorf("InspectAll on %s: %w", c.grpcAddr, err)
 	}
-	return resp.GetGroups()
+	got := resp.GetGroups()
+	if got == nil {
+		return []*fodcv1.GroupLifecycleInfo{}, nil
+	}
+	return got, nil
 }
 
 func (c *Collector) readReportFiles() []*fodcv1.LifecycleReport {

@@ -28,12 +28,24 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protojson"
+
+	fodcv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/fodc/v1"
 	"github.com/apache/skywalking-banyandb/fodc/proxy/internal/cluster"
 	"github.com/apache/skywalking-banyandb/fodc/proxy/internal/lifecycle"
 	"github.com/apache/skywalking-banyandb/fodc/proxy/internal/metrics"
 	"github.com/apache/skywalking-banyandb/fodc/proxy/internal/registry"
 	"github.com/apache/skywalking-banyandb/pkg/logger"
 )
+
+// lifecycleGroupMarshaler emits zero-value protobuf fields (replicas=0, close=false, empty
+// stages, etc.) as explicit JSON keys instead of dropping them. The default encoding/json +
+// protoc-gen-go combination would silence those fields via `omitempty`, leaving downstream
+// consumers (SRE agent) unable to tell "field absent" from "value is zero".
+var lifecycleGroupMarshaler = protojson.MarshalOptions{
+	UseProtoNames:   true,
+	EmitUnpopulated: true,
+}
 
 // Server exposes REST and Prometheus-style endpoints for external consumption.
 type Server struct {
@@ -486,11 +498,36 @@ func (s *Server) handleClusterLifecycle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	lifecycleData := s.lifecycleManager.CollectLifecycle(r.Context())
+
+	groupsJSON, err := marshalLifecycleGroups(lifecycleData.Groups)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Failed to marshal lifecycle groups")
+		http.Error(w, "Failed to serialize lifecycle groups", http.StatusInternalServerError)
+		return
+	}
+
+	body := map[string]interface{}{
+		"groups":             groupsJSON,
+		"lifecycle_statuses": lifecycleData.LifecycleStatuses,
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	if encodeErr := json.NewEncoder(w).Encode(lifecycleData); encodeErr != nil {
+	if encodeErr := json.NewEncoder(w).Encode(body); encodeErr != nil {
 		s.logger.Error().Err(encodeErr).Msg("Failed to encode lifecycle response")
 	}
+}
+
+func marshalLifecycleGroups(groups []*fodcv1.GroupLifecycleInfo) ([]json.RawMessage, error) {
+	out := make([]json.RawMessage, 0, len(groups))
+	for _, g := range groups {
+		raw, err := lifecycleGroupMarshaler.Marshal(g)
+		if err != nil {
+			return nil, fmt.Errorf("marshal group %q: %w", g.GetName(), err)
+		}
+		out = append(out, raw)
+	}
+	return out, nil
 }
 
 // handleClusterTopology handles GET /cluster/topology endpoint.
