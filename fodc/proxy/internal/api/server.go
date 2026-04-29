@@ -488,6 +488,15 @@ type timeSeriesMetric struct {
 }
 
 // handleClusterLifecycle handles GET /cluster/lifecycle endpoint.
+//
+// The handler adds an "error" field to the response body whenever the proxy could not
+// gather any lifecycle data — that is, when no agent was registered (Total == 0), no
+// registered agent supported the lifecycle stream (Requested == 0), or none of the
+// requested agents responded within the collection window (Responded == 0). The error
+// message describes which of these three sub-cases occurred so callers can distinguish an
+// infrastructure-layer outage (e.g. proxy pod restart with every agent failing to
+// reconnect) from a cluster that genuinely has no groups. The HTTP status stays 200 in
+// every case; the distinguishing signal is in the body, not in the status code.
 func (s *Server) handleClusterLifecycle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -497,7 +506,7 @@ func (s *Server) handleClusterLifecycle(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Lifecycle manager not available", http.StatusServiceUnavailable)
 		return
 	}
-	lifecycleData := s.lifecycleManager.CollectLifecycle(r.Context())
+	lifecycleData, agentSummary := s.lifecycleManager.CollectLifecycle(r.Context())
 
 	groupsJSON, err := marshalLifecycleGroups(lifecycleData.Groups)
 	if err != nil {
@@ -509,6 +518,17 @@ func (s *Server) handleClusterLifecycle(w http.ResponseWriter, r *http.Request) 
 	body := map[string]interface{}{
 		"groups":             groupsJSON,
 		"lifecycle_statuses": lifecycleData.LifecycleStatuses,
+		"agent_summary":      agentSummary,
+	}
+	switch {
+	case agentSummary.Total == 0:
+		body["error"] = "FODC unavailable: no agents registered"
+	case agentSummary.Requested == 0:
+		body["error"] = fmt.Sprintf("FODC unavailable: 0/%d registered agents support the lifecycle stream",
+			agentSummary.Total)
+	case agentSummary.Responded == 0:
+		body["error"] = fmt.Sprintf("FODC unavailable: 0/%d requested agents responded",
+			agentSummary.Requested)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
