@@ -92,7 +92,9 @@ func (c *Collector) Collect(ctx context.Context) (*fodcv1.LifecycleData, error) 
 	reports := c.readReportFiles()
 	groups, err := c.collectGroups(ctx)
 	if err != nil {
-		c.log.Warn().Err(err).Msg("InspectAll failed; cache untouched, downstream will see empty groups")
+		if c.log != nil {
+			c.log.Warn().Err(err).Msg("InspectAll failed; cache untouched, downstream will see empty groups")
+		}
 		return &fodcv1.LifecycleData{Reports: reports}, nil
 	}
 
@@ -134,7 +136,9 @@ func (c *Collector) collectGroups(ctx context.Context) ([]*fodcv1.GroupLifecycle
 	if err != nil {
 		if status.Code(err) == codes.Unimplemented {
 			c.grpcUnimplemented.Store(true)
-			c.log.Info().Str("addr", c.grpcAddr).Msg("GroupLifecycleService.InspectAll is not implemented, skipping future calls")
+			if c.log != nil {
+				c.log.Info().Str("addr", c.grpcAddr).Msg("GroupLifecycleService.InspectAll is not implemented, skipping future calls")
+			}
 			return nil, nil
 		}
 		return nil, fmt.Errorf("InspectAll on %s: %w", c.grpcAddr, err)

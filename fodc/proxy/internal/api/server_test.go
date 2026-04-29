@@ -842,6 +842,7 @@ func runLifecycleHandlerWithGroup(t *testing.T, group *fodcv1.GroupLifecycleInfo
 	initTestLogger(t)
 	testLogger := logger.GetLogger("test", "api")
 	testRegistry := registry.NewAgentRegistry(testLogger, 5*time.Second, 10*time.Second, 100)
+	t.Cleanup(testRegistry.Stop)
 	mockSender := &mockRequestSender{}
 	aggregator := metrics.NewAggregator(testRegistry, mockSender, testLogger)
 
