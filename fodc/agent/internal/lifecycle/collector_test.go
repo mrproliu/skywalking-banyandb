@@ -309,8 +309,8 @@ func TestCollect_DoesNotCacheTransientFailure(t *testing.T) {
 	ctx := t.Context()
 
 	data1, err := collector.Collect(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, data1.Groups, "transient failure with no prior cache should yield empty groups")
+	require.Error(t, err, "transient failure must propagate to caller")
+	assert.Nil(t, data1, "no LifecycleData on failure")
 
 	collector.mu.RLock()
 	cachedData := collector.currentData
@@ -326,7 +326,7 @@ func TestCollect_DoesNotCacheTransientFailure(t *testing.T) {
 	assert.Equal(t, 2, fake.calls(), "InspectAll must be invoked twice")
 }
 
-func TestCollect_FailureReturnsEmptyGroups(t *testing.T) {
+func TestCollect_FailurePropagatesError(t *testing.T) {
 	successGroups := []*fodcv1.GroupLifecycleInfo{sampleGroup("g1"), sampleGroup("g2"), sampleGroup("g3")}
 	fake := &fakeLifecycleService{
 		behaviors: []func() (*fodcv1.InspectAllResponse, error){
@@ -342,8 +342,8 @@ func TestCollect_FailureReturnsEmptyGroups(t *testing.T) {
 	require.Len(t, data1.Groups, 3)
 
 	data2, err := collector.Collect(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, data2.Groups, "transient failure must surface as empty groups, not stale cached data")
+	require.Error(t, err, "transient failure after a successful collect must still surface as an error")
+	assert.Nil(t, data2, "caller must not receive a LifecycleData payload on failure")
 	assert.Equal(t, 2, fake.calls())
 }
 
@@ -370,7 +370,7 @@ func TestCollect_TransientFailureDoesNotAdvanceLastCollectTime(t *testing.T) {
 
 	now = now.Add(2 * time.Hour) // expire the cache to force a new RPC
 	_, err = collector.Collect(ctx)
-	require.NoError(t, err)
+	require.Error(t, err, "transient failure must surface as an error to the caller")
 	collector.mu.RLock()
 	failureTime := collector.lastCollectTime
 	collector.mu.RUnlock()

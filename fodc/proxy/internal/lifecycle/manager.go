@@ -21,18 +21,19 @@ package lifecycle
 import (
 	"context"
 	"sync"
-	"time"
 
 	fodcv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/fodc/v1"
+	"github.com/apache/skywalking-banyandb/fodc/internal/timeouts"
 	"github.com/apache/skywalking-banyandb/fodc/proxy/internal/registry"
 	"github.com/apache/skywalking-banyandb/pkg/logger"
 )
 
-// defaultCollectionTimeout bounds how long the proxy waits for each agent to push back its
-// lifecycle data. It must be greater than or equal to the agent-side InspectAll timeout
-// (see lifecycle.DefaultGRPCTimeout in fodc/agent/internal/lifecycle), otherwise the proxy
-// gives up before the agent has a chance to deliver a successful response.
-const defaultCollectionTimeout = 40 * time.Second
+// defaultCollectionTimeout bounds how long the proxy waits for each agent to push back
+// its lifecycle data. It is derived from the agent-side InspectAll timeout plus a fixed
+// slack so that this deadline is strictly greater than the agent's own deadline; the
+// proxy must always outlast the agent and never give up while a still-progressing
+// InspectAll call is in flight on the agent side.
+const defaultCollectionTimeout = timeouts.AgentInspectAll + timeouts.ProxySlack
 
 // PodLifecycleStatus represents lifecycle status for a single pod.
 type PodLifecycleStatus struct {

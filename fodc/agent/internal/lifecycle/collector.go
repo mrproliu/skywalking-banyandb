@@ -35,6 +35,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	fodcv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/fodc/v1"
+	"github.com/apache/skywalking-banyandb/fodc/internal/timeouts"
 	"github.com/apache/skywalking-banyandb/pkg/logger"
 )
 
@@ -43,10 +44,6 @@ const (
 	DefaultReportDir  = "/tmp/lifecycle-reports"
 	maxReportFiles    = 5
 	maxReportFileSize = 5 * 1024 * 1024 // 5MB
-	// DefaultGRPCTimeout bounds how long a single InspectAll call may run. It must be
-	// less than or equal to the proxy-side per-agent collection deadline; otherwise the
-	// proxy gives up before the agent has a chance to deliver a successful response.
-	DefaultGRPCTimeout = 40 * time.Second
 )
 
 // Collector collects lifecycle data from local files.
@@ -76,10 +73,10 @@ func NewCollector(log *logger.Logger, grpcAddr, reportDir string, cacheTTL time.
 	}
 }
 
-// Collect returns lifecycle data, serving the cache when fresh. On a transient
-// InspectAll failure the cache is left untouched so the next call retries, and the
-// current call returns Reports with empty Groups so downstream sees the failure
-// rather than stale data masking a real outage.
+// Collect returns lifecycle data, serving the cache when fresh. A transient InspectAll
+// failure is propagated to the caller (the cache is left untouched so the next call
+// retries) so that callers can distinguish a real failure from a healthy liaison that
+// happens to have zero groups.
 func (c *Collector) Collect(ctx context.Context) (*fodcv1.LifecycleData, error) {
 	c.mu.RLock()
 	if c.currentData != nil && c.cacheTTL > 0 && c.nowFunc().Sub(c.lastCollectTime) < c.cacheTTL {
@@ -93,9 +90,10 @@ func (c *Collector) Collect(ctx context.Context) (*fodcv1.LifecycleData, error) 
 	groups, err := c.collectGroups(ctx)
 	if err != nil {
 		if c.log != nil {
-			c.log.Warn().Err(err).Msg("InspectAll failed; cache untouched, downstream will see empty groups")
+			c.log.Warn().Err(err).Int("reports", len(reports)).
+				Msg("InspectAll failed; cache untouched, propagating error to caller")
 		}
-		return &fodcv1.LifecycleData{Reports: reports}, nil
+		return nil, err
 	}
 
 	data := &fodcv1.LifecycleData{
@@ -130,7 +128,7 @@ func (c *Collector) collectGroups(ctx context.Context) ([]*fodcv1.GroupLifecycle
 	}()
 
 	client := fodcv1.NewGroupLifecycleServiceClient(conn)
-	reqCtx, cancel := context.WithTimeout(ctx, DefaultGRPCTimeout)
+	reqCtx, cancel := context.WithTimeout(ctx, timeouts.AgentInspectAll)
 	defer cancel()
 	resp, err := client.InspectAll(reqCtx, &fodcv1.InspectAllRequest{})
 	if err != nil {
