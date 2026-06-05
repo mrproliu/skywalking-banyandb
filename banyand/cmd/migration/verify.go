@@ -29,6 +29,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/apache/skywalking-banyandb/banyand/measure"
+	"github.com/apache/skywalking-banyandb/banyand/stream"
 )
 
 func newVerifyCmd() *cobra.Command {
@@ -56,13 +57,34 @@ migration result.`,
 			if err != nil {
 				return err
 			}
-			// staging dir is unused by verify (read-only), pass "".
-			cfg := plan.ToDirectCopyConfig("")
+
+			catalogs, catErr := plan.detectCatalog()
+			if catErr != nil {
+				return catErr
+			}
+			kind, kindErr := classifyPlanCatalog(catalogs, plan.Groups)
+			if kindErr != nil {
+				return kindErr
+			}
 
 			ctx, stop := signal.NotifyContext(context.Background(),
 				os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
+			if kind == catalogStream {
+				// staging dir unused by verify (read-only), pass "".
+				cfg := plan.ToStreamDirectCopyConfig("")
+				streamTally := &verifyTally{isStream: true}
+				runErr := stream.StreamMigrationVerify(ctx, cfg, func(r stream.StreamEntryGroupReport) {
+					printOneStreamReport(r)
+					streamTally.absorbStream(r)
+				})
+				streamTally.printSummary()
+				return runErr
+			}
+
+			// staging dir is unused by verify (read-only), pass "".
+			cfg := plan.ToDirectCopyConfig("")
 			tally := &verifyTally{}
 			runErr := measure.MigrationVerify(ctx, cfg, func(r measure.EntryGroupReport) {
 				printOneReport(r)
@@ -82,6 +104,7 @@ migration result.`,
 // verifyTally accumulates the per-(node, group) findings the callback
 // stream emits so we can print a single roll-up SUMMARY block at the
 // end of the run — the per-report stream prints itself.
+// When isStream is true, printSummary uses stream-specific messaging.
 type verifyTally struct {
 	mismatches     []verifyMismatch
 	coverage       map[string]map[string]coverageState // node → group → (src/tgt presence)
@@ -91,6 +114,7 @@ type verifyTally struct {
 	tgtRowsTotal   uint64
 	segsTotal      int
 	segsMisaligned int
+	isStream       bool
 }
 
 // coverageState records whether SOURCE and TARGET independently hold
@@ -145,7 +169,7 @@ func (t *verifyTally) absorb(r measure.EntryGroupReport) {
 		t.coverage[node] = make(map[string]coverageState)
 		t.nodeOrder = append(t.nodeOrder, node)
 	}
-	if _, ok := indexOf(t.groupOrder, r.Group); !ok {
+	if !indexOf(t.groupOrder, r.Group) {
 		t.groupOrder = append(t.groupOrder, r.Group)
 	}
 
@@ -176,17 +200,21 @@ func (t *verifyTally) absorb(r measure.EntryGroupReport) {
 	}
 }
 
-func indexOf(xs []string, v string) (int, bool) {
-	for i, x := range xs {
+func indexOf(xs []string, v string) bool {
+	for _, x := range xs {
 		if x == v {
-			return i, true
+			return true
 		}
 	}
-	return 0, false
+	return false
 }
 
 func (t *verifyTally) printSummary() {
-	fmt.Println("== SUMMARY ==")
+	if t.isStream {
+		fmt.Println("== SUMMARY (stream) ==")
+	} else {
+		fmt.Println("== SUMMARY ==")
+	}
 	t.printCoverageTable()
 	fmt.Println()
 	fmt.Printf("  target segments                : %d\n", t.segsTotal)
@@ -198,12 +226,20 @@ func (t *verifyTally) printSummary() {
 			fmt.Printf("  diff (tgt - src)               : %+d (UNEXPECTED — target has MORE rows than source)\n",
 				int64(t.tgtRowsTotal)-int64(t.srcRowsTotal))
 		} else {
-			fmt.Println("  src == tgt")
+			if t.isStream {
+				fmt.Println("  src == tgt  (stream invariant: no rows dropped)")
+			} else {
+				fmt.Println("  src == tgt")
+			}
 		}
 		return
 	}
 	fmt.Println()
-	fmt.Println("  row-count mismatches (tgt - src, negative = rows dropped by copy):")
+	if t.isStream {
+		fmt.Println("  row-count mismatches (stream must have 0 diff — any non-zero is a BUG):")
+	} else {
+		fmt.Println("  row-count mismatches (tgt - src, negative = rows dropped by copy):")
+	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "    stage\tnode\tgroup\tsrc\ttgt\tdiff")
 	var total int64
@@ -215,7 +251,11 @@ func (t *verifyTally) printSummary() {
 	}
 	fmt.Fprintf(tw, "    %s\t\t\t\t\t%+d\n", "TOTAL", total)
 	_ = tw.Flush()
-	if total < 0 {
+	if t.isStream {
+		fmt.Println()
+		fmt.Println("  note: stream never deduplicates — any row-count diff indicates a real")
+		fmt.Println("        migration bug. Run `migration analyze` for the exact missing rows.")
+	} else if total < 0 {
 		fmt.Println()
 		fmt.Println("  note: rows dropped are caused by slow-path mustInitFromDataPoints")
 		fmt.Println("        deduping (seriesID, timestamp) within each chunk flush — banyandb's")
@@ -335,5 +375,102 @@ func printOneReport(r measure.EntryGroupReport) {
 		}
 		fmt.Printf("    %-22s %s shards=%d parts=%d rows=%d %s\n",
 			s.Seg, alignTag, s.Shards, s.Parts, s.Rows, sidxTag)
+	}
+}
+
+// absorbStream records one stream (entry, group) report into the tally.
+func (t *verifyTally) absorbStream(r stream.StreamEntryGroupReport) {
+	node := streamEntryNodeName(r)
+	if t.coverage == nil {
+		t.coverage = make(map[string]map[string]coverageState)
+	}
+	if _, ok := t.coverage[node]; !ok {
+		t.coverage[node] = make(map[string]coverageState)
+		t.nodeOrder = append(t.nodeOrder, node)
+	}
+	if !indexOf(t.groupOrder, r.Group) {
+		t.groupOrder = append(t.groupOrder, r.Group)
+	}
+
+	t.srcRowsTotal += r.SrcRows
+	var tgtRows uint64
+	for _, s := range r.TargetSegs {
+		tgtRows += s.Rows
+		if !s.Aligned {
+			t.segsMisaligned++
+		}
+	}
+	t.tgtRowsTotal += tgtRows
+	t.segsTotal += len(r.TargetSegs)
+
+	t.coverage[node][r.Group] = coverageState{
+		src: r.SrcRows > 0,
+		tgt: tgtRows > 0,
+	}
+
+	if tgtRows != r.SrcRows {
+		t.mismatches = append(t.mismatches, verifyMismatch{
+			Stage:    r.EntryStage,
+			NodeName: node,
+			Group:    r.Group,
+			SrcRows:  r.SrcRows,
+			TgtRows:  tgtRows,
+		})
+	}
+}
+
+func streamEntryNodeName(r stream.StreamEntryGroupReport) string {
+	switch len(r.EntryNodes) {
+	case 0:
+		return r.EntryStage
+	case 1:
+		return r.EntryNodes[0]
+	default:
+		return strings.Join(r.EntryNodes, ",")
+	}
+}
+
+// printOneStreamReport renders a single (entry, group) stream report.
+func printOneStreamReport(r stream.StreamEntryGroupReport) {
+	fmt.Printf("== entry stage=%s target=%s group=%s (stream) ==\n",
+		r.EntryStage, r.EntryTarget, r.Group)
+	if len(r.SrcRoots) == 0 {
+		fmt.Printf("  src  : (no source dirs resolved for this entry/group)\n")
+	} else {
+		fmt.Printf("  src  : %d row(s) across %d part(s) in %d dir(s)\n",
+			r.SrcRows, r.SrcParts, len(r.SrcRoots))
+		for _, p := range r.SrcRoots {
+			fmt.Printf("           %s\n", p)
+		}
+	}
+	if len(r.TargetSegs) == 0 {
+		fmt.Printf("  tgt  : (no segments under %s)\n", r.TargetGroup)
+		return
+	}
+	var tgtRows uint64
+	for _, s := range r.TargetSegs {
+		tgtRows += s.Rows
+	}
+	fmt.Printf("  tgt  : %d row(s) across %d seg(s) under %s\n",
+		tgtRows, len(r.TargetSegs), r.TargetGroup)
+	for _, s := range r.TargetSegs {
+		alignTag := "aligned"
+		if !s.Aligned {
+			alignTag = "MISALIGNED"
+		}
+		sidxTag := "no-sidx"
+		if s.SidxOpened {
+			sidxTag = fmt.Sprintf("sidxDocs=%d", s.SidxDocCount)
+		}
+		fmt.Printf("    %-22s %s shards=%d parts=%d rows=%d %s\n",
+			s.Seg, alignTag, len(s.Shards), s.Parts, s.Rows, sidxTag)
+		for _, sh := range s.Shards {
+			idxTag := "no-idx"
+			if sh.IdxOpened {
+				idxTag = fmt.Sprintf("idxDocs=%d", sh.IdxDocCount)
+			}
+			fmt.Printf("      %-20s rows=%d parts=%d %s\n",
+				sh.Shard, sh.Rows, sh.Parts, idxTag)
+		}
 	}
 }

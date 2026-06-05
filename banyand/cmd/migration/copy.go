@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/apache/skywalking-banyandb/banyand/measure"
+	"github.com/apache/skywalking-banyandb/banyand/stream"
 	"github.com/apache/skywalking-banyandb/pkg/cgroups"
 )
 
@@ -85,12 +86,26 @@ topology must match.`,
 				}
 			}()
 
-			cfg := plan.ToDirectCopyConfig(stagingDir)
+			catalogs, catErr := plan.detectCatalog()
+			if catErr != nil {
+				return catErr
+			}
+			kind, kindErr := classifyPlanCatalog(catalogs, plan.Groups)
+			if kindErr != nil {
+				return kindErr
+			}
 
 			ctx, stop := signal.NotifyContext(context.Background(),
 				os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
+			if kind == catalogStream {
+				cfg := plan.ToStreamDirectCopyConfig(stagingDir)
+				res, runErr := stream.StreamMigrationCopy(ctx, cfg)
+				printStreamCopyResult(res)
+				return runErr
+			}
+			cfg := plan.ToDirectCopyConfig(stagingDir)
 			res, runErr := measure.MigrationCopy(ctx, cfg)
 			printCopyResult(res)
 			return runErr
@@ -101,6 +116,18 @@ topology must match.`,
 		"path to the YAML migration copy plan (required)")
 	_ = cmd.MarkFlagRequired("copy-config")
 	return cmd
+}
+
+func printStreamCopyResult(res stream.StreamDirectCopyResult) {
+	fmt.Println("DONE in", res.Duration)
+	fmt.Printf("   target segments   : %d\n", res.Segments)
+	fmt.Printf("   source parts      : %d\n", res.SourceParts)
+	fmt.Printf("   target mem-parts  : %d (pre-merge; banyandb's merge loop will compact)\n", res.TargetParts)
+	fmt.Printf("   rows copied       : %d\n", res.Rows)
+	fmt.Printf("   bytes written     : %d\n", res.Bytes)
+	fmt.Printf("   fast-path parts   : %d\n", stream.StreamFastPathHits())
+	fmt.Printf("   slow-path parts   : %d\n", stream.StreamSlowPathHits())
+	fmt.Printf("   slow-path rows    : %d\n", stream.StreamSlowPathRows())
 }
 
 func printCopyResult(res measure.DirectCopyResult) {

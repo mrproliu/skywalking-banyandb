@@ -24,8 +24,13 @@ import (
 
 	"sigs.k8s.io/yaml"
 
+	commonv1 "github.com/apache/skywalking-banyandb/api/proto/banyandb/common/v1"
 	"github.com/apache/skywalking-banyandb/banyand/measure"
+	"github.com/apache/skywalking-banyandb/banyand/stream"
 )
+
+// catalogStream is the string token returned by classifyPlanCatalog for stream groups.
+const catalogStream = "stream"
 
 // CopyPlan is the YAML config schema consumed by `migration copy`.
 //
@@ -164,7 +169,7 @@ func (p *CopyPlan) Validate() error {
 		}
 	}
 	if len(p.Groups) == 0 {
-		return fmt.Errorf("groups must list at least one measure group")
+		return fmt.Errorf("groups must list at least one group")
 	}
 	seenGroup := make(map[string]bool, len(p.Groups))
 	for _, g := range p.Groups {
@@ -298,4 +303,93 @@ func (p *CopyPlan) ToDirectCopyConfig(stagingDir string) measure.DirectCopyConfi
 	}
 	cfg.Entries = entries
 	return cfg
+}
+
+// ToStreamDirectCopyConfig converts the YAML plan into the stream package's
+// StreamDirectCopyConfig. stagingDir is required for copy (series index union);
+// pass "" when only doing read-only operations (verify/analyze never write union-sidx artifacts).
+func (p *CopyPlan) ToStreamDirectCopyConfig(stagingDir string) stream.StreamDirectCopyConfig {
+	cfg := stream.StreamDirectCopyConfig{
+		Groups:         p.Groups,
+		SidxStagingDir: stagingDir,
+	}
+	entries := make([]stream.StreamDirectCopyEntry, len(p.Entries))
+	if p.Source.Backup != nil {
+		cfg.BackupDir = p.Source.Backup.Root
+		cfg.Date = p.Source.Backup.Date
+		for i, e := range p.Entries {
+			entries[i] = stream.StreamDirectCopyEntry{
+				Stage:  e.Stage,
+				Target: e.Target,
+				Nodes:  append([]string(nil), e.Nodes...),
+			}
+		}
+	} else {
+		cfg.SchemaPropertyPath = p.Source.Live.SchemaPropertyPath
+		for i, e := range p.Entries {
+			rootByNode := map[string]string{}
+			for _, n := range p.Source.Live.Stages[e.Stage] {
+				rootByNode[n.Node] = n.Root
+			}
+			srcs := make([]string, 0, len(e.Nodes))
+			for _, n := range e.Nodes {
+				srcs = append(srcs, rootByNode[n])
+			}
+			entries[i] = stream.StreamDirectCopyEntry{
+				Stage:  e.Stage,
+				Target: e.Target,
+				Source: srcs,
+				Nodes:  append([]string(nil), e.Nodes...),
+			}
+		}
+	}
+	cfg.Entries = entries
+	return cfg
+}
+
+// detectCatalog reads the backup schema-property and returns the Catalog
+// for each group in the plan. It uses the stream package's DetectGroupCatalogs
+// (which reads KindGroup docs from the bluge schema-property catalog).
+func (p *CopyPlan) detectCatalog() (map[string]commonv1.Catalog, error) {
+	var backupDir, date, schemaPropertyPath string
+	if p.Source.Backup != nil {
+		backupDir = p.Source.Backup.Root
+		date = p.Source.Backup.Date
+	} else {
+		schemaPropertyPath = p.Source.Live.SchemaPropertyPath
+	}
+	return stream.DetectGroupCatalogs(backupDir, date, schemaPropertyPath, p.Groups)
+}
+
+// catalogKind classifies a plan's groups after loading per-group catalogs.
+// Returns "measure", "stream", or an error for mixed/unsupported catalogs.
+func classifyPlanCatalog(catalogs map[string]commonv1.Catalog, groups []string) (string, error) {
+	var firstCatalog commonv1.Catalog
+	var firstGroup string
+	for _, g := range groups {
+		cat, ok := catalogs[g]
+		if !ok || cat == commonv1.Catalog_CATALOG_UNSPECIFIED {
+			// Refuse to guess: routing a stream group through the measure path (or
+			// vice versa) reads the wrong on-disk format and silently produces
+			// zero/garbage output. Make the operator fix the source/group instead.
+			return "", fmt.Errorf("group %q: catalog not found in the source schema-property catalog "+
+				"(check source path/date and that the group exists)", g)
+		}
+		if cat == commonv1.Catalog_CATALOG_TRACE {
+			return "", fmt.Errorf("group %q has catalog TRACE: trace migration is not supported yet", g)
+		}
+		if firstGroup == "" {
+			firstCatalog = cat
+			firstGroup = g
+			continue
+		}
+		if cat != firstCatalog {
+			return "", fmt.Errorf("mixed catalog plan: group %q has catalog %v but group %q has catalog %v; all groups must be the same catalog",
+				g, cat, firstGroup, firstCatalog)
+		}
+	}
+	if firstCatalog == commonv1.Catalog_CATALOG_STREAM {
+		return catalogStream, nil
+	}
+	return "measure", nil
 }

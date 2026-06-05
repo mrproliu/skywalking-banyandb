@@ -14,7 +14,7 @@ Two end-to-end procedures, depending on where the source data lives:
 
 For the tool's CLI surface, plan schema, and on-disk output layout, see [`README.md`](README.md).
 
-> **Scope:** the tool only migrates **measure** data. Stream / trace / property catalogs and `sw_metadata` are out of scope — they stay in place (Part 2) or remain on the source backup (Part 1).
+> **Scope:** the tool migrates **measure** and **stream** data. The catalog of each group is auto-detected from the schema-property catalog and the plan is routed accordingly (one plan must be homogeneous — all-measure or all-stream); the runbook steps below are identical for both, substituting the stream data roots / `--stream-root` where a measure path is shown. Trace / property catalogs and `sw_metadata` are out of scope — they stay in place (Part 2) or remain on the source backup (Part 1). Stream notes (no dedup → exact row parity; the `idx/` element index; the one-stream-per-group slow-path limit) are covered in [`README.md`](README.md) and [`STREAM_MIGRATION_DESIGN.md`](STREAM_MIGRATION_DESIGN.md).
 
 ---
 
